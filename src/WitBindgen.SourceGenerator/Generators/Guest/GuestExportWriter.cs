@@ -111,6 +111,22 @@ public static class GuestExportWriter
                 LiftParam(sb, param, coreParams, liftedArgs);
             }
 
+            // Free WASM memory for lifted string/list parameters (callee owns the memory per canonical ABI)
+            foreach (var param in func.Parameters)
+            {
+                switch (param.Type.Kind)
+                {
+                    case WitTypeKind.String:
+                        sb.AppendLine($"WitBindgen.Runtime.InteropHelpers.Free((byte*){param.CSharpVariableName}_0, {param.CSharpVariableName}_1, 1);");
+                        break;
+                    case WitTypeKind.List when param.Type is WitListType listType:
+                        var elemSize = CanonicalAbi.MemorySize(listType.ElementType);
+                        var elemAlign = CanonicalAbi.MemoryAlign(listType.ElementType);
+                        sb.AppendLine($"WitBindgen.Runtime.InteropHelpers.Free((byte*){param.CSharpVariableName}_0, {param.CSharpVariableName}_1 * {elemSize}, {elemAlign});");
+                        break;
+                }
+            }
+
             // Call the user's implementation
             var callArgs = string.Join(", ", liftedArgs);
             if (func.Results.Length == 0)

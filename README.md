@@ -99,25 +99,24 @@ world hello-world {
 <Project Sdk="Microsoft.NET.Sdk">
     <PropertyGroup>
         <TargetFramework>net10.0</TargetFramework>
+        <RuntimeIdentifier>wasi-wasm</RuntimeIdentifier>
     </PropertyGroup>
 
     <ItemGroup>
-        <ProjectReference Include="path/to/WitBindgen.SourceGenerator.csproj"
-                          OutputItemType="Analyzer"
-                          ReferenceOutputAssembly="false" />
-        <ProjectReference Include="path/to/WitBindgen.Runtime.csproj" />
+        <PackageReference Include="WitBindgen.SourceGenerator" Version="0.1.0">
+            <PrivateAssets>all</PrivateAssets>
+            <IncludeAssets>runtime; build; native; contentfiles; analyzers</IncludeAssets>
+        </PackageReference>
+        <PackageReference Include="WitBindgen.Runtime" Version="0.1.0" />
     </ItemGroup>
 
     <ItemGroup>
         <WasmComponentTypeWit Include="wit\hello.wit" />
     </ItemGroup>
-
-    <Import Project="path/to/WitBindgen.SourceGenerator.props" />
-    <Import Project="path/to/WitBindgen.SourceGenerator.targets" />
 </Project>
 ```
 
-The `.props` file sets WASI-WASM defaults (`RuntimeIdentifier`, `AllowUnsafeBlocks`, `SelfContained`, etc.) and adds the NativeAOT-LLVM compiler packages automatically. To override the LLVM version:
+The NuGet package sets WASI-WASM defaults (`AllowUnsafeBlocks`, `SelfContained`, etc.) and adds the NativeAOT-LLVM compiler packages automatically. To override the LLVM version:
 
 ```xml
 <PropertyGroup>

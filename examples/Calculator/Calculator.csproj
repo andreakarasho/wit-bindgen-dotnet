@@ -2,6 +2,7 @@
 
     <PropertyGroup>
         <TargetFramework>net10.0</TargetFramework>
+        <RuntimeIdentifier>wasi-wasm</RuntimeIdentifier>
         <ImplicitUsings>enable</ImplicitUsings>
         <Nullable>enable</Nullable>
         <InvariantGlobalization>true</InvariantGlobalization>
@@ -9,18 +10,15 @@
     </PropertyGroup>
 
     <ItemGroup>
-        <ProjectReference Include="..\..\src\WitBindgen.SourceGenerator\WitBindgen.SourceGenerator.csproj"
-                          OutputItemType="Analyzer"
-                          ReferenceOutputAssembly="false" />
-        <ProjectReference Include="..\..\src\WitBindgen.Runtime\WitBindgen.Runtime.csproj" />
+        <PackageReference Include="WitBindgen.SourceGenerator" Version="*">
+            <PrivateAssets>all</PrivateAssets>
+            <IncludeAssets>runtime; build; native; contentfiles; analyzers</IncludeAssets>
+        </PackageReference>
+        <PackageReference Include="WitBindgen.Runtime" Version="*" />
     </ItemGroup>
-
 
     <ItemGroup>
         <WasmComponentTypeWit Include="wit\calculator.wit" />
     </ItemGroup>
-
-    <Import Project="..\..\src\WitBindgen.SourceGenerator\build\WitBindgen.SourceGenerator.props" />
-    <Import Project="..\..\src\WitBindgen.SourceGenerator\build\WitBindgen.SourceGenerator.targets" />
 
 </Project>

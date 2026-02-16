@@ -6,7 +6,19 @@
         <Nullable>enable</Nullable>
         <ImplicitUsings>enable</ImplicitUsings>
         <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+        <IsPackable>true</IsPackable>
+        <Authors>andreakarasho</Authors>
+        <Description>Runtime helpers for .NET WebAssembly guest components built with WitBindgen.SourceGenerator. Provides canonical ABI interop utilities (memory allocation, string marshalling, handle tables) used by the generated bindings.</Description>
+        <PackageTags>webassembly;wasm;wit;component-model;wasi;runtime</PackageTags>
+        <PackageLicenseExpression>Apache-2.0 WITH LLVM-exception</PackageLicenseExpression>
+        <PackageProjectUrl>https://github.com/andreakarasho/wit-bindgen-dotnet</PackageProjectUrl>
+        <RepositoryUrl>https://github.com/andreakarasho/wit-bindgen-dotnet</RepositoryUrl>
+        <PackageReadmeFile>README.md</PackageReadmeFile>
     </PropertyGroup>
+
+    <ItemGroup>
+        <None Include="..\..\README.md" Pack="true" PackagePath="/" Visible="false" />
+    </ItemGroup>
 
     <ItemGroup>
         <PackageReference Include="PolySharp" Version="1.15.0" PrivateAssets="all" />

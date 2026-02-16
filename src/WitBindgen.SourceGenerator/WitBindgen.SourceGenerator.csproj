@@ -11,12 +11,21 @@
         <DevelopmentDependency>true</DevelopmentDependency>
         <EnforceExtendedAnalyzerRules>true</EnforceExtendedAnalyzerRules>
         <SgfAddModuleInitializerAttribute>false</SgfAddModuleInitializerAttribute>
+        <IsPackable>true</IsPackable>
+        <Authors>andreakarasho</Authors>
+        <Description>C# source generator that produces guest-side bindings from WIT (WebAssembly Interface Types) definitions for the Component Model. Generates DllImport stubs and UnmanagedCallersOnly exports for building .NET WASM components via NativeAOT-LLVM.</Description>
+        <PackageTags>webassembly;wasm;wit;component-model;source-generator;wasi</PackageTags>
+        <PackageLicenseExpression>Apache-2.0 WITH LLVM-exception</PackageLicenseExpression>
+        <PackageProjectUrl>https://github.com/andreakarasho/wit-bindgen-dotnet</PackageProjectUrl>
+        <RepositoryUrl>https://github.com/andreakarasho/wit-bindgen-dotnet</RepositoryUrl>
+        <PackageReadmeFile>README.md</PackageReadmeFile>
     </PropertyGroup>
 
     <ItemGroup>
         <Content Include="$(OutputPath)\$(AssemblyName).dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
         <Content Include="build\WitBindgen.SourceGenerator.props" Pack="true" PackagePath="build" Visible="false" />
         <Content Include="build\WitBindgen.SourceGenerator.targets" Pack="true" PackagePath="build" Visible="false" />
+        <None Include="..\..\README.md" Pack="true" PackagePath="/" Visible="false" />
     </ItemGroup>
 
     <ItemGroup>

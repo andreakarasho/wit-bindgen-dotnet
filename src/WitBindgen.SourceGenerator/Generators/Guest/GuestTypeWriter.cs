@@ -35,7 +35,7 @@ public static class GuestTypeWriter
 
     public static void WriteFlags(IndentedStringBuilder sb, WitFlags flags)
     {
-        sb.AppendLine("[System.Flags]");
+        sb.AppendLine("[global::System.Flags]");
         sb.AppendLine($"public enum {flags.CSharpName}");
         using (sb.Block())
         {
@@ -52,12 +52,12 @@ public static class GuestTypeWriter
     {
         var name = StringUtils.GetName(variant.Name);
 
-        sb.AppendLine($"[System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Explicit)]");
+        sb.AppendLine($"[global::System.Runtime.InteropServices.StructLayout(global::System.Runtime.InteropServices.LayoutKind.Explicit)]");
         sb.AppendLine($"public struct {name}");
         using (sb.Block())
         {
             // Discriminant field
-            sb.AppendLine("[System.Runtime.InteropServices.FieldOffset(0)]");
+            sb.AppendLine("[global::System.Runtime.InteropServices.FieldOffset(0)]");
             sb.AppendLine("public Case Discriminant;");
             sb.AppendLine();
 
@@ -67,7 +67,7 @@ public static class GuestTypeWriter
                 if (@case.Type is not null)
                 {
                     var caseName = StringUtils.GetName(@case.Name);
-                    sb.AppendLine("[System.Runtime.InteropServices.FieldOffset(4)]");
+                    sb.AppendLine("[global::System.Runtime.InteropServices.FieldOffset(4)]");
                     sb.AppendLine($"public {CanonicalAbi.WitTypeToCS(@case.Type)} {caseName}Payload;");
                 }
             }

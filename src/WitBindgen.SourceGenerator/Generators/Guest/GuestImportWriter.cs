@@ -63,8 +63,8 @@ public static class GuestImportWriter
         List<CoreWasmType> flatResults,
         bool useRetPtr)
     {
-        sb.AppendLine($"[System.Runtime.InteropServices.DllImport(\"{moduleName}\", EntryPoint = \"{funcName}\")]");
-        sb.AppendLine("[System.Runtime.InteropServices.WasmImportLinkage]");
+        sb.AppendLine($"[global::System.Runtime.InteropServices.DllImport(\"{moduleName}\", EntryPoint = \"{funcName}\")]");
+        sb.AppendLine("[global::System.Runtime.InteropServices.WasmImportLinkage]");
 
         var paramList = new List<string>();
         foreach (var (type, name) in flatParams)
@@ -125,7 +125,7 @@ public static class GuestImportWriter
             returnType = "void"; // multi-return not directly supported yet
         }
 
-        sb.AppendLine("[System.Runtime.CompilerServices.SkipLocalsInit]");
+        sb.AppendLine("[global::System.Runtime.CompilerServices.SkipLocalsInit]");
         sb.AppendLine($"public static unsafe {returnType} {csharpFuncName}({string.Join(", ", highLevelParams)})");
         using (sb.Block())
         {
@@ -164,7 +164,7 @@ public static class GuestImportWriter
                     WriteParamCleanup(sb, func);
                     sb.AppendLine("var resultPtr = (byte*)retArea[0];");
                     sb.AppendLine("var resultLen = retArea[1];");
-                    sb.AppendLine("var result = System.Text.Encoding.UTF8.GetString(resultPtr, resultLen);");
+                    sb.AppendLine("var result = global::System.Text.Encoding.UTF8.GetString(resultPtr, resultLen);");
                     sb.AppendLine("WitBindgen.Runtime.InteropHelpers.Free(resultPtr, resultLen, 1);");
                     sb.AppendLine("return result;");
                     return;
@@ -197,7 +197,7 @@ public static class GuestImportWriter
                 {
                     sb.AppendLine("var resultPtr = (byte*)retArea[0];");
                     sb.AppendLine("var resultLen = retArea[1];");
-                    sb.AppendLine("var result = System.Text.Encoding.UTF8.GetString(resultPtr, resultLen);");
+                    sb.AppendLine("var result = global::System.Text.Encoding.UTF8.GetString(resultPtr, resultLen);");
                     sb.AppendLine("WitBindgen.Runtime.InteropHelpers.Free(resultPtr, resultLen, 1);");
                     sb.AppendLine("return result;");
                 }
@@ -282,12 +282,12 @@ public static class GuestImportWriter
                 var rentedVar = $"{varName}Rented";
                 var bufVar = $"{varName}Buf";
                 var ptrVar = $"{varName}Ptr";
-                sb.AppendLine($"var {byteLenVar} = System.Text.Encoding.UTF8.GetByteCount({varName});");
+                sb.AppendLine($"var {byteLenVar} = global::System.Text.Encoding.UTF8.GetByteCount({varName});");
                 sb.AppendLine($"byte[]? {rentedVar} = null;");
                 sb.AppendLine($"Span<byte> {bufVar} = {byteLenVar} <= 512");
                 sb.AppendLine($"    ? stackalloc byte[{byteLenVar}]");
-                sb.AppendLine($"    : new Span<byte>({rentedVar} = System.Buffers.ArrayPool<byte>.Shared.Rent({byteLenVar}), 0, {byteLenVar});");
-                sb.AppendLine($"System.Text.Encoding.UTF8.GetBytes({varName}, {bufVar});");
+                sb.AppendLine($"    : new Span<byte>({rentedVar} = global::System.Buffers.ArrayPool<byte>.Shared.Rent({byteLenVar}), 0, {byteLenVar});");
+                sb.AppendLine($"global::System.Text.Encoding.UTF8.GetBytes({varName}, {bufVar});");
                 sb.AppendLine($"var {ptrVar} = WitBindgen.Runtime.InteropHelpers.SpanToPointer({bufVar});");
                 callArgs.Add($"(int)(nint){ptrVar}");
                 callArgs.Add(byteLenVar);
@@ -323,7 +323,7 @@ public static class GuestImportWriter
                         sb.AppendLine($"for (int {varName}Idx = 0; {varName}Idx < {countVar}; {varName}Idx++)");
                         using (sb.Block())
                         {
-                            sb.AppendLine($"{byteCountsVar}[{varName}Idx] = System.Text.Encoding.UTF8.GetByteCount({varName}[{varName}Idx]);");
+                            sb.AppendLine($"{byteCountsVar}[{varName}Idx] = global::System.Text.Encoding.UTF8.GetByteCount({varName}[{varName}Idx]);");
                             sb.AppendLine($"{totalBytesVar} += {byteCountsVar}[{varName}Idx];");
                         }
 
@@ -331,13 +331,13 @@ public static class GuestImportWriter
                         sb.AppendLine($"byte[]? {listRentedVar} = null;");
                         sb.AppendLine($"Span<byte> {listBufVar} = {varName}ListBufSize <= 512");
                         sb.AppendLine($"    ? stackalloc byte[{varName}ListBufSize]");
-                        sb.AppendLine($"    : new Span<byte>({listRentedVar} = System.Buffers.ArrayPool<byte>.Shared.Rent({varName}ListBufSize), 0, {varName}ListBufSize);");
+                        sb.AppendLine($"    : new Span<byte>({listRentedVar} = global::System.Buffers.ArrayPool<byte>.Shared.Rent({varName}ListBufSize), 0, {varName}ListBufSize);");
 
                         // Single batch buffer for ALL string bytes
                         sb.AppendLine($"byte[]? {stringsRentedVar} = null;");
                         sb.AppendLine($"Span<byte> {stringsBufVar} = {totalBytesVar} <= 1024");
                         sb.AppendLine($"    ? stackalloc byte[Math.Max({totalBytesVar}, 1)]");
-                        sb.AppendLine($"    : new Span<byte>({stringsRentedVar} = System.Buffers.ArrayPool<byte>.Shared.Rent({totalBytesVar}), 0, Math.Max({totalBytesVar}, 1));");
+                        sb.AppendLine($"    : new Span<byte>({stringsRentedVar} = global::System.Buffers.ArrayPool<byte>.Shared.Rent({totalBytesVar}), 0, Math.Max({totalBytesVar}, 1));");
 
                         sb.AppendLine($"byte* {listPtrVar} = WitBindgen.Runtime.InteropHelpers.SpanToPointer({listBufVar});");
                         sb.AppendLine($"byte* {stringsPtrVar} = WitBindgen.Runtime.InteropHelpers.SpanToPointer({stringsBufVar});");
@@ -349,7 +349,7 @@ public static class GuestImportWriter
                         {
                             var idxVar = $"{varName}Idx";
                             sb.AppendLine($"var elemByteLen = {byteCountsVar}[{idxVar}];");
-                            sb.AppendLine($"System.Text.Encoding.UTF8.GetBytes({varName}[{idxVar}], {stringsBufVar}.Slice({varName}StringOffset, elemByteLen));");
+                            sb.AppendLine($"global::System.Text.Encoding.UTF8.GetBytes({varName}[{idxVar}], {stringsBufVar}.Slice({varName}StringOffset, elemByteLen));");
                             sb.AppendLine($"*(int*)({listPtrVar} + {idxVar} * {elemSize}) = (int)(nint)({stringsPtrVar} + {varName}StringOffset);");
                             sb.AppendLine($"*(int*)({listPtrVar} + {idxVar} * {elemSize} + 4) = elemByteLen;");
                             sb.AppendLine($"{varName}StringOffset += elemByteLen;");
@@ -361,7 +361,7 @@ public static class GuestImportWriter
                         sb.AppendLine($"byte[]? {listRentedVar} = null;");
                         sb.AppendLine($"Span<byte> {listBufVar} = {varName}ListBufSize <= 512");
                         sb.AppendLine($"    ? stackalloc byte[{varName}ListBufSize]");
-                        sb.AppendLine($"    : new Span<byte>({listRentedVar} = System.Buffers.ArrayPool<byte>.Shared.Rent({varName}ListBufSize), 0, {varName}ListBufSize);");
+                        sb.AppendLine($"    : new Span<byte>({listRentedVar} = global::System.Buffers.ArrayPool<byte>.Shared.Rent({varName}ListBufSize), 0, {varName}ListBufSize);");
                         sb.AppendLine($"byte* {listPtrVar} = WitBindgen.Runtime.InteropHelpers.SpanToPointer({listBufVar});");
 
                         sb.AppendLine($"for (int {varName}Idx = 0; {varName}Idx < {countVar}; {varName}Idx++)");
@@ -422,9 +422,9 @@ public static class GuestImportWriter
                 sb.AppendLine($"*(double*){baseVar} = {elemExpr};");
                 break;
             case WitTypeKind.String:
-                sb.AppendLine($"var elemByteLen = System.Text.Encoding.UTF8.GetByteCount({elemExpr});");
+                sb.AppendLine($"var elemByteLen = global::System.Text.Encoding.UTF8.GetByteCount({elemExpr});");
                 sb.AppendLine($"var elemPtr = WitBindgen.Runtime.InteropHelpers.Alloc(elemByteLen, 1);");
-                sb.AppendLine($"System.Text.Encoding.UTF8.GetBytes({elemExpr}, new Span<byte>((void*)elemPtr, elemByteLen));");
+                sb.AppendLine($"global::System.Text.Encoding.UTF8.GetBytes({elemExpr}, new Span<byte>((void*)elemPtr, elemByteLen));");
                 sb.AppendLine($"*(int*){baseVar} = (int)elemPtr;");
                 sb.AppendLine($"*(int*)({baseVar} + 4) = elemByteLen;");
                 break;
@@ -487,7 +487,7 @@ public static class GuestImportWriter
             switch (type.Kind)
             {
                 case WitTypeKind.String:
-                    sb.AppendLine($"if ({varName}Rented != null) System.Buffers.ArrayPool<byte>.Shared.Return({varName}Rented);");
+                    sb.AppendLine($"if ({varName}Rented != null) global::System.Buffers.ArrayPool<byte>.Shared.Return({varName}Rented);");
                     break;
 
                 case WitTypeKind.List:
@@ -495,10 +495,10 @@ public static class GuestImportWriter
                     {
                         if (listType.ElementType.Kind == WitTypeKind.String)
                         {
-                            sb.AppendLine($"if ({varName}StringsRented != null) System.Buffers.ArrayPool<byte>.Shared.Return({varName}StringsRented);");
+                            sb.AppendLine($"if ({varName}StringsRented != null) global::System.Buffers.ArrayPool<byte>.Shared.Return({varName}StringsRented);");
                         }
 
-                        sb.AppendLine($"if ({varName}ListRented != null) System.Buffers.ArrayPool<byte>.Shared.Return({varName}ListRented);");
+                        sb.AppendLine($"if ({varName}ListRented != null) global::System.Buffers.ArrayPool<byte>.Shared.Return({varName}ListRented);");
                     }
                     break;
             }
@@ -546,7 +546,7 @@ public static class GuestImportWriter
             case WitTypeKind.String:
                 sb.AppendLine($"var elemStrPtr = (byte*)*(int*){baseVar};");
                 sb.AppendLine($"var elemStrLen = *(int*)({baseVar} + 4);");
-                sb.AppendLine($"{listVar}.Add(System.Text.Encoding.UTF8.GetString(elemStrPtr, elemStrLen));");
+                sb.AppendLine($"{listVar}.Add(global::System.Text.Encoding.UTF8.GetString(elemStrPtr, elemStrLen));");
                 break;
             default:
                 sb.AppendLine($"// TODO: lift list element of type {elemType.Kind}");
@@ -592,7 +592,7 @@ public static class GuestImportWriter
         var className = resource.CSharpName;
         var witName = resource.Name;
 
-        sb.AppendLine($"public class {className} : System.IDisposable");
+        sb.AppendLine($"public class {className} : global::System.IDisposable");
         using (sb.Block())
         {
             // Handle property and private constructor
@@ -658,12 +658,12 @@ public static class GuestImportWriter
                 highLevelParams.Add($"{CanonicalAbi.WitTypeToCS(param.Type)} {param.CSharpVariableName}");
             }
 
-            sb.AppendLine("[System.Runtime.CompilerServices.SkipLocalsInit]");
+            sb.AppendLine("[global::System.Runtime.CompilerServices.SkipLocalsInit]");
             sb.AppendLine($"public static unsafe {className} Create({string.Join(", ", highLevelParams)})");
             using (sb.Block())
             {
                 sb.AppendLine($"// TODO: fallible constructor returns {CanonicalAbi.WitTypeToCS(ctor.ReturnType!)} — full result lifting not yet implemented");
-                sb.AppendLine($"throw new System.NotImplementedException(\"Fallible resource constructors are not yet supported.\");");
+                sb.AppendLine($"throw new global::System.NotImplementedException(\"Fallible resource constructors are not yet supported.\");");
             }
         }
         else
@@ -675,7 +675,7 @@ public static class GuestImportWriter
                 highLevelParams.Add($"{CanonicalAbi.WitTypeToCS(param.Type)} {param.CSharpVariableName}");
             }
 
-            sb.AppendLine("[System.Runtime.CompilerServices.SkipLocalsInit]");
+            sb.AppendLine("[global::System.Runtime.CompilerServices.SkipLocalsInit]");
             sb.AppendLine($"public unsafe {className}({string.Join(", ", highLevelParams)})");
             using (sb.Block())
             {
@@ -731,7 +731,7 @@ public static class GuestImportWriter
 
         var useRetPtr = CanonicalAbi.ShouldUseRetPtr(funcType);
 
-        sb.AppendLine("[System.Runtime.CompilerServices.SkipLocalsInit]");
+        sb.AppendLine("[global::System.Runtime.CompilerServices.SkipLocalsInit]");
         sb.AppendLine($"public {staticModifier}unsafe {returnType} {csharpMethodName}({string.Join(", ", highLevelParams)})");
         using (sb.Block())
         {
@@ -776,7 +776,7 @@ public static class GuestImportWriter
                     WriteResourceMethodCleanup(sb, funcType);
                     sb.AppendLine("var resultPtr = (byte*)retArea[0];");
                     sb.AppendLine("var resultLen = retArea[1];");
-                    sb.AppendLine("var result = System.Text.Encoding.UTF8.GetString(resultPtr, resultLen);");
+                    sb.AppendLine("var result = global::System.Text.Encoding.UTF8.GetString(resultPtr, resultLen);");
                     sb.AppendLine("WitBindgen.Runtime.InteropHelpers.Free(resultPtr, resultLen, 1);");
                     sb.AppendLine("return result;");
                 }
@@ -809,7 +809,7 @@ public static class GuestImportWriter
                     {
                         sb.AppendLine("var resultPtr = (byte*)retArea[0];");
                         sb.AppendLine("var resultLen = retArea[1];");
-                        sb.AppendLine("var result = System.Text.Encoding.UTF8.GetString(resultPtr, resultLen);");
+                        sb.AppendLine("var result = global::System.Text.Encoding.UTF8.GetString(resultPtr, resultLen);");
                         sb.AppendLine("WitBindgen.Runtime.InteropHelpers.Free(resultPtr, resultLen, 1);");
                         sb.AppendLine("return result;");
                     }
@@ -856,16 +856,16 @@ public static class GuestImportWriter
         switch (type.Kind)
         {
             case WitTypeKind.String:
-                sb.AppendLine($"if ({varName}Rented != null) System.Buffers.ArrayPool<byte>.Shared.Return({varName}Rented);");
+                sb.AppendLine($"if ({varName}Rented != null) global::System.Buffers.ArrayPool<byte>.Shared.Return({varName}Rented);");
                 break;
             case WitTypeKind.List:
                 if (type is WitListType listType)
                 {
                     if (listType.ElementType.Kind == WitTypeKind.String)
                     {
-                        sb.AppendLine($"if ({varName}StringsRented != null) System.Buffers.ArrayPool<byte>.Shared.Return({varName}StringsRented);");
+                        sb.AppendLine($"if ({varName}StringsRented != null) global::System.Buffers.ArrayPool<byte>.Shared.Return({varName}StringsRented);");
                     }
-                    sb.AppendLine($"if ({varName}ListRented != null) System.Buffers.ArrayPool<byte>.Shared.Return({varName}ListRented);");
+                    sb.AppendLine($"if ({varName}ListRented != null) global::System.Buffers.ArrayPool<byte>.Shared.Return({varName}ListRented);");
                 }
                 break;
         }
@@ -909,8 +909,8 @@ public static class GuestImportWriter
 
                 var paramListStr = string.Join(", ", flatParams.Select(p => $"{p.type} {p.name}"));
 
-                sb.AppendLine($"[System.Runtime.InteropServices.DllImport(\"{moduleName}\", EntryPoint = \"[constructor]{witName}\")]");
-                sb.AppendLine("[System.Runtime.InteropServices.WasmImportLinkage]");
+                sb.AppendLine($"[global::System.Runtime.InteropServices.DllImport(\"{moduleName}\", EntryPoint = \"[constructor]{witName}\")]");
+                sb.AppendLine("[global::System.Runtime.InteropServices.WasmImportLinkage]");
                 sb.AppendLine($"internal static extern int Constructor({paramListStr});");
                 sb.AppendLine();
             }
@@ -936,8 +936,8 @@ public static class GuestImportWriter
             }
 
             // Resource drop
-            sb.AppendLine($"[System.Runtime.InteropServices.DllImport(\"{moduleName}\", EntryPoint = \"[resource-drop]{witName}\")]");
-            sb.AppendLine("[System.Runtime.InteropServices.WasmImportLinkage]");
+            sb.AppendLine($"[global::System.Runtime.InteropServices.DllImport(\"{moduleName}\", EntryPoint = \"[resource-drop]{witName}\")]");
+            sb.AppendLine("[global::System.Runtime.InteropServices.WasmImportLinkage]");
             sb.AppendLine("internal static extern void ResourceDrop(int handle);");
         }
     }
@@ -1000,8 +1000,8 @@ public static class GuestImportWriter
             returnType = "void";
         }
 
-        sb.AppendLine($"[System.Runtime.InteropServices.DllImport(\"{moduleName}\", EntryPoint = \"{entryPoint}\")]");
-        sb.AppendLine("[System.Runtime.InteropServices.WasmImportLinkage]");
+        sb.AppendLine($"[global::System.Runtime.InteropServices.DllImport(\"{moduleName}\", EntryPoint = \"{entryPoint}\")]");
+        sb.AppendLine("[global::System.Runtime.InteropServices.WasmImportLinkage]");
         sb.AppendLine($"internal static extern {returnType} {csharpMethodName}({string.Join(", ", paramList)});");
     }
 

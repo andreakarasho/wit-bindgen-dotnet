@@ -524,7 +524,7 @@ public static class CanonicalAbi
             WitTypeKind.F64 => "double",
             WitTypeKind.Char => "uint",
             WitTypeKind.String => "string",
-            WitTypeKind.List => type is WitListType lt ? $"System.Collections.Generic.List<{WitTypeToCS(lt.ElementType)}>" : "object",
+            WitTypeKind.List => type is WitListType lt ? $"global::System.Collections.Generic.List<{WitTypeToCS(lt.ElementType)}>" : "object",
             WitTypeKind.Record => type is WitRecordType rt ? rt.CSharpName : "object",
             WitTypeKind.Enum => type is WitEnumType et ? et.CSharpName : "int",
             WitTypeKind.Flags => type is WitFlagsType ft ? ft.CSharpName : "int",

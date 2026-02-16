@@ -99,8 +99,8 @@ public static class GuestExportWriter
         }
 
         var coreParamList = coreParams.Select(p => $"{p.type} {p.name}");
-        sb.AppendLine($"[System.Runtime.InteropServices.UnmanagedCallersOnly(EntryPoint = \"{entryPoint}\")]");
-        sb.AppendLine("[System.Runtime.CompilerServices.SkipLocalsInit]");
+        sb.AppendLine($"[global::System.Runtime.InteropServices.UnmanagedCallersOnly(EntryPoint = \"{entryPoint}\")]");
+        sb.AppendLine("[global::System.Runtime.CompilerServices.SkipLocalsInit]");
         sb.AppendLine($"private static unsafe {coreReturnType} __wit_export_{funcName(entryPoint)}({string.Join(", ", coreParamList)})");
         using (sb.Block())
         {
@@ -203,7 +203,7 @@ public static class GuestExportWriter
                 var ptrVar = $"{param.CSharpVariableName}_0";
                 var lenVar = $"{param.CSharpVariableName}_1";
                 var liftedVar = $"{param.CSharpVariableName}Str";
-                sb.AppendLine($"var {liftedVar} = System.Text.Encoding.UTF8.GetString((byte*){ptrVar}, {lenVar});");
+                sb.AppendLine($"var {liftedVar} = global::System.Text.Encoding.UTF8.GetString((byte*){ptrVar}, {lenVar});");
                 liftedArgs.Add(liftedVar);
                 break;
 
@@ -263,9 +263,9 @@ public static class GuestExportWriter
                 break;
 
             case WitTypeKind.String:
-                sb.AppendLine("var byteLen = System.Text.Encoding.UTF8.GetByteCount(result);");
+                sb.AppendLine("var byteLen = global::System.Text.Encoding.UTF8.GetByteCount(result);");
                 sb.AppendLine("var ptr = WitBindgen.Runtime.InteropHelpers.Alloc(byteLen, 1);");
-                sb.AppendLine("System.Text.Encoding.UTF8.GetBytes(result, new Span<byte>((void*)ptr, byteLen));");
+                sb.AppendLine("global::System.Text.Encoding.UTF8.GetBytes(result, new Span<byte>((void*)ptr, byteLen));");
                 sb.AppendLine();
                 sb.AppendLine("var retArea = WitBindgen.Runtime.InteropHelpers.GetReturnArea();");
                 sb.AppendLine("*(int*)retArea = (int)ptr;");
@@ -353,7 +353,7 @@ public static class GuestExportWriter
             case WitTypeKind.String:
                 sb.AppendLine($"var elemStrPtr = (byte*)*(int*){baseVar};");
                 sb.AppendLine($"var elemStrLen = *(int*)({baseVar} + 4);");
-                sb.AppendLine($"{listVar}.Add(System.Text.Encoding.UTF8.GetString(elemStrPtr, elemStrLen));");
+                sb.AppendLine($"{listVar}.Add(global::System.Text.Encoding.UTF8.GetString(elemStrPtr, elemStrLen));");
                 break;
             default:
                 sb.AppendLine($"// TODO: lift list element of type {elemType.Kind}");
@@ -394,9 +394,9 @@ public static class GuestExportWriter
                 sb.AppendLine($"*(double*){baseVar} = {elemExpr};");
                 break;
             case WitTypeKind.String:
-                sb.AppendLine($"var elemByteLen = System.Text.Encoding.UTF8.GetByteCount({elemExpr});");
+                sb.AppendLine($"var elemByteLen = global::System.Text.Encoding.UTF8.GetByteCount({elemExpr});");
                 sb.AppendLine($"var elemPtr = WitBindgen.Runtime.InteropHelpers.Alloc(elemByteLen, 1);");
-                sb.AppendLine($"System.Text.Encoding.UTF8.GetBytes({elemExpr}, new Span<byte>((void*)elemPtr, elemByteLen));");
+                sb.AppendLine($"global::System.Text.Encoding.UTF8.GetBytes({elemExpr}, new Span<byte>((void*)elemPtr, elemByteLen));");
                 sb.AppendLine($"*(int*){baseVar} = (int)elemPtr;");
                 sb.AppendLine($"*(int*)({baseVar} + 4) = elemByteLen;");
                 break;
@@ -416,7 +416,7 @@ public static class GuestExportWriter
         var postEntryPoint = $"cabi_post_{entryPoint}";
         var safeName = funcName(postEntryPoint);
 
-        sb.AppendLine($"[System.Runtime.InteropServices.UnmanagedCallersOnly(EntryPoint = \"{postEntryPoint}\")]");
+        sb.AppendLine($"[global::System.Runtime.InteropServices.UnmanagedCallersOnly(EntryPoint = \"{postEntryPoint}\")]");
         sb.AppendLine($"private static unsafe void __wit_post_return_{funcName(entryPoint)}(nint retPtr)");
         using (sb.Block())
         {

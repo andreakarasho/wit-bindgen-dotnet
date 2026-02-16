@@ -8,4 +8,8 @@
         <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     </PropertyGroup>
 
+    <ItemGroup>
+        <PackageReference Include="MinVer" Version="6.0.0" PrivateAssets="all" />
+    </ItemGroup>
+
 </Project>

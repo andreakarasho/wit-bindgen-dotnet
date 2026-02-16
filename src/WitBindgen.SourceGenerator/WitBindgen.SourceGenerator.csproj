@@ -42,6 +42,7 @@
         </PackageReference>
         <PackageReference Include="SourceGenerator.Foundations" Version="2.0.13" />
         <PackageReference Include="Antlr4.Runtime.Standard" Version="4.13.1" />
+        <PackageReference Include="MinVer" Version="6.0.0" PrivateAssets="all" />
         <PackageReference Update="*" PrivateAssets="all" />
     </ItemGroup>
 

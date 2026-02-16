@@ -9,10 +9,6 @@
         <EmitCompilerGeneratedFiles>true</EmitCompilerGeneratedFiles>
     </PropertyGroup>
 
-    <PropertyGroup>
-        <WitBindgenGeneratorDir>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)..\..\src\WitBindgen.SourceGenerator\bin\$(Configuration)\netstandard2.0\'))</WitBindgenGeneratorDir>
-    </PropertyGroup>
-
     <ItemGroup>
         <ProjectReference Include="..\..\src\WitBindgen.SourceGenerator\WitBindgen.SourceGenerator.csproj"
                           OutputItemType="Analyzer"
@@ -21,11 +17,9 @@
     </ItemGroup>
 
     <ItemGroup>
-        <Analyzer Include="$(WitBindgenGeneratorDir)Antlr4.Runtime.Standard.dll" />
+        <WasmComponentTypeWit Include="wit\hello.wit" />
     </ItemGroup>
 
-    <ItemGroup>
-        <AdditionalFiles Include="wit\hello.wit" />
-    </ItemGroup>
+    <Import Project="..\..\src\WitBindgen.SourceGenerator\build\WitBindgen.SourceGenerator.targets" />
 
 </Project>

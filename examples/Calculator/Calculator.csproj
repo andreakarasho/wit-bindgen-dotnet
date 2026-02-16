@@ -4,29 +4,9 @@
         <TargetFramework>net10.0</TargetFramework>
         <ImplicitUsings>enable</ImplicitUsings>
         <Nullable>enable</Nullable>
-        <RuntimeIdentifier>wasi-wasm</RuntimeIdentifier>
-        <UseAppHost>false</UseAppHost>
-        <PublishTrimmed>true</PublishTrimmed>
         <InvariantGlobalization>true</InvariantGlobalization>
-        <SelfContained>true</SelfContained>
-        <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-        <MSBuildEnableWorkloadResolver>false</MSBuildEnableWorkloadResolver>
         <EmitCompilerGeneratedFiles>true</EmitCompilerGeneratedFiles>
     </PropertyGroup>
-
-
-    <ItemGroup>
-        <PackageReference Include="Microsoft.DotNet.ILCompiler.LLVM" Version="10.0.0-*" />
-        <PackageReference Include="runtime.$(NETCoreSdkPortableRuntimeIdentifier).Microsoft.DotNet.ILCompiler.LLVM" Version="10.0.0-*" />
-    </ItemGroup>
-
-    <PropertyGroup>
-        <WitBindgenGeneratorDir>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)..\..\src\WitBindgen.SourceGenerator\bin\$(Configuration)\netstandard2.0\'))</WitBindgenGeneratorDir>
-    </PropertyGroup>
-
-        <ItemGroup>
-        <Analyzer Include="$(WitBindgenGeneratorDir)Antlr4.Runtime.Standard.dll" />
-    </ItemGroup>
 
     <ItemGroup>
         <ProjectReference Include="..\..\src\WitBindgen.SourceGenerator\WitBindgen.SourceGenerator.csproj"
@@ -40,6 +20,7 @@
         <WasmComponentTypeWit Include="wit\calculator.wit" />
     </ItemGroup>
 
+    <Import Project="..\..\src\WitBindgen.SourceGenerator\build\WitBindgen.SourceGenerator.props" />
     <Import Project="..\..\src\WitBindgen.SourceGenerator\build\WitBindgen.SourceGenerator.targets" />
 
 </Project>

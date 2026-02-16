@@ -25,4 +25,15 @@ public static partial class Calculator
 
         return Math.Round(result, (int)precision);
     }
+
+    public static partial void AcceptString(string a)
+    {
+
+    }
+
+    public static partial string ReturnString(uint len)
+    {
+        return new string('a', (int)len);
+    }
+
 }

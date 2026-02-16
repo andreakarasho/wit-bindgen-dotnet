@@ -59,5 +59,27 @@ class Program
             var result = exports.Calculate(op, a, b);
             Console.WriteLine($"calculate({name}, {a}, {b}) = {result}");
         }
+
+
+        var s = new string('a', 100 * 1024 * 1024);
+        for (var i = 0; i < 50; ++i)
+        {
+            exports.AcceptString(s);
+
+            if (i % 10 == 0)
+            {
+                Console.WriteLine("iteration {0}", i);
+            }
+        }
+
+        for (var i = 0; i < 50; ++i)
+        {
+            var str = exports.ReturnString(100 * 1024 * 1024);
+
+            if (i % 10 == 0)
+            {
+                Console.WriteLine("iteration {0}", i);
+            }
+        }
     }
 }

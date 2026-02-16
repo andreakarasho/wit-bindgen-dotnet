@@ -57,4 +57,7 @@ world calculator {
 
     export add: func(a: f64, b: f64) -> f64;
     export calculate: func(op: u32, a: f64, b: f64) -> f64;
+
+    export accept-string: func(a: string);
+    export return-string: func(len: u32) -> string;
 }

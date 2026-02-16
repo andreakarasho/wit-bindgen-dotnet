@@ -1,5 +1,9 @@
 # wit-bindgen-dotnet
 
+[![NuGet](https://img.shields.io/nuget/v/WitBindgen.SourceGenerator.svg)](https://www.nuget.org/packages/WitBindgen.SourceGenerator)
+[![NuGet](https://img.shields.io/nuget/v/WitBindgen.Runtime.svg)](https://www.nuget.org/packages/WitBindgen.Runtime)
+[![CI](https://github.com/andreakarasho/wit-bindgen-dotnet/actions/workflows/ci.yml/badge.svg)](https://github.com/andreakarasho/wit-bindgen-dotnet/actions/workflows/ci.yml)
+
 C# source generator that produces bindings from [WIT (WebAssembly Interface Types)](https://github.com/WebAssembly/component-model/blob/main/design/mvp/WIT.md) definitions, enabling .NET WebAssembly components using the [Component Model](https://component-model.bytecodealliance.org/).
 
 ## What it does

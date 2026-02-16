@@ -94,20 +94,8 @@ world hello-world {
 ```xml
 <Project Sdk="Microsoft.NET.Sdk">
     <PropertyGroup>
-       <TargetFramework>net10.0</TargetFramework>
-        <RuntimeIdentifier>wasi-wasm</RuntimeIdentifier>
-        <UseAppHost>false</UseAppHost>
-        <PublishTrimmed>true</PublishTrimmed>
-        <InvariantGlobalization>true</InvariantGlobalization>
-        <SelfContained>true</SelfContained>
-        <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-        <MSBuildEnableWorkloadResolver>false</MSBuildEnableWorkloadResolver>
+        <TargetFramework>net10.0</TargetFramework>
     </PropertyGroup>
-
-    <ItemGroup>
-        <PackageReference Include="Microsoft.DotNet.ILCompiler.LLVM" Version="10.0.0-*" />
-        <PackageReference Include="runtime.$(NETCoreSdkPortableRuntimeIdentifier).Microsoft.DotNet.ILCompiler.LLVM" Version="10.0.0-*" />
-    </ItemGroup>
 
     <ItemGroup>
         <ProjectReference Include="path/to/WitBindgen.SourceGenerator.csproj"
@@ -120,8 +108,17 @@ world hello-world {
         <WasmComponentTypeWit Include="wit\hello.wit" />
     </ItemGroup>
 
+    <Import Project="path/to/WitBindgen.SourceGenerator.props" />
     <Import Project="path/to/WitBindgen.SourceGenerator.targets" />
 </Project>
+```
+
+The `.props` file sets WASI-WASM defaults (`RuntimeIdentifier`, `AllowUnsafeBlocks`, `SelfContained`, etc.) and adds the NativeAOT-LLVM compiler packages automatically. To override the LLVM version:
+
+```xml
+<PropertyGroup>
+    <NativeAotLlvmVersion>10.0.0-preview.5.25277.114</NativeAotLlvmVersion>
+</PropertyGroup>
 ```
 
 **3. Implement the exports:**

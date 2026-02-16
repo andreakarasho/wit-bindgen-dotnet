@@ -1,0 +1,11 @@
+<Solution>
+  <Project Path="src/WitBindgen.SourceGenerator/WitBindgen.SourceGenerator.csproj" />
+  <Project Path="src/WitBindgen.Runtime/WitBindgen.Runtime.csproj" />
+  <Project Path="tests/WitBindgen.Tests/WitBindgen.Tests.csproj" />
+
+  <Folder Name="/examples/">
+    <Project Path="examples/HelloWorld/HelloWorld.csproj" />
+    <Project Path="examples/Calculator/Calculator.csproj" />
+    <Project Path="examples/CalculatorHost/CalculatorHost.csproj" />
+  </Folder>
+</Solution>

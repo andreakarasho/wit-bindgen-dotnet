@@ -1,0 +1,6 @@
+<Project>
+  <!-- Automatically feed WasmComponentTypeWit items to the Roslyn source generator as AdditionalFiles -->
+  <ItemGroup>
+    <AdditionalFiles Include="@(WasmComponentTypeWit)" />
+  </ItemGroup>
+</Project>

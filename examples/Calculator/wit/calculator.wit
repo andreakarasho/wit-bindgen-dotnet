@@ -1,0 +1,60 @@
+package example:calculator@1.0.0;
+
+interface types {
+    enum operation {
+        add,
+        subtract,
+        multiply,
+        divide,
+    }
+
+    flags trace-level {
+        info,
+        warn,
+        error,
+    }
+
+    record calc-request {
+        lhs: f64,
+        rhs: f64,
+        op: u32,
+    }
+
+    record calc-result {
+        value: f64,
+        ok: bool,
+    }
+
+    variant calc-error {
+        division-by-zero,
+        overflow(f64),
+        unknown(s32),
+    }
+
+    resource blob {
+        constructor(init: list<u8>);
+        write: func(bytes: list<u8>);
+        read: func(n: u32) -> list<u8>;
+        merge: static func(lhs: borrow<blob>, rhs: borrow<blob>) -> blob;
+    }
+
+    resource blob2 {
+        constructor(init: list<u8>) -> result<blob2>;
+    }
+}
+
+interface logger {
+    log: func(level: u32, message: string);
+}
+
+world calculator {
+    import logger;
+    import types;
+
+    import get-precision: func() -> u32;
+    import get-precision2: func(a: list<string>) -> u32;
+    import get-precision3: func(a: list<u32>) -> u32;
+
+    export add: func(a: f64, b: f64) -> f64;
+    export calculate: func(op: u32, a: f64, b: f64) -> f64;
+}

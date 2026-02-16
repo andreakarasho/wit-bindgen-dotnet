@@ -1,0 +1,11 @@
+package example:hello@1.0.0;
+
+interface console {
+    log: func(message: string);
+}
+
+world hello-world {
+    import console;
+    import get-name: func() -> string;
+    export run: func() -> string;
+}

@@ -1,0 +1,4 @@
+[submodule "external/wasmtime-dotnet"]
+	path = external/wasmtime-dotnet
+	url = https://github.com/andreakarasho/wasmtime-dotnet.git
+	branch = component-model

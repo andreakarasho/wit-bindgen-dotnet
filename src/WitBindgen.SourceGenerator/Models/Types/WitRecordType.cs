@@ -1,0 +1,22 @@
+namespace WitBindgen.SourceGenerator.Models;
+
+/// <summary>
+/// Represents a record type in WIT.
+/// </summary>
+public record WitRecordType(WitPackageNameVersion Package, string Name, EquatableArray<WitField> Fields) : WitType(WitTypeKind.Record)
+{
+    public string CSharpName { get; } = StringUtils.GetName(Name);
+}
+
+/// <summary>
+/// Represents a field in a WIT record or interface.
+/// </summary>
+public readonly record struct WitField(
+    string Name,
+    WitType Type
+)
+{
+    public string CSharpName { get; } = StringUtils.GetName(Name);
+
+    public string CSharpVariableName { get; } = StringUtils.GetName(Name, uppercaseFirst: false);
+}

@@ -19,6 +19,7 @@
         <PackageProjectUrl>https://github.com/andreakarasho/wit-bindgen-dotnet</PackageProjectUrl>
         <RepositoryUrl>https://github.com/andreakarasho/wit-bindgen-dotnet</RepositoryUrl>
         <PackageReadmeFile>README.md</PackageReadmeFile>
+        <MinVerTagPrefix>v</MinVerTagPrefix>
     </PropertyGroup>
 
     <ItemGroup>

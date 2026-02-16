@@ -129,7 +129,7 @@ interface types {
         GuestTypeWriter.WriteFlags(sb, flags!);
         var code = sb.ToString();
 
-        Assert.Contains("[System.Flags]", code);
+        Assert.Contains("[global::System.Flags]", code);
         Assert.Contains("public enum Permissions", code);
         Assert.Contains("Read = 1", code);
         Assert.Contains("Write = 2", code);
@@ -204,13 +204,13 @@ world test-world {
         var code = sb.ToString();
 
         // Verify DllImport stub
-        Assert.Contains("[System.Runtime.InteropServices.DllImport(\"$root\", EntryPoint = \"add\")]", code);
-        Assert.Contains("[System.Runtime.InteropServices.WasmImportLinkage]", code);
+        Assert.Contains("[global::System.Runtime.InteropServices.DllImport(\"$root\", EntryPoint = \"add\")]", code);
+        Assert.Contains("[global::System.Runtime.InteropServices.WasmImportLinkage]", code);
         Assert.Contains("internal static extern", code);
         Assert.Contains("int Add(", code);
 
         // Verify high-level wrapper
-        Assert.Contains("[System.Runtime.CompilerServices.SkipLocalsInit]", code);
+        Assert.Contains("[global::System.Runtime.CompilerServices.SkipLocalsInit]", code);
         Assert.Contains("public static unsafe int Add(int a, int b)", code);
     }
 
@@ -242,7 +242,7 @@ world test-world {
         // String lowering (stackalloc/ArrayPool pattern)
         Assert.Contains("UTF8.GetByteCount(name)", code);
         Assert.Contains("stackalloc byte[nameByteLen]", code);
-        Assert.Contains("new Span<byte>(nameRented = System.Buffers.ArrayPool<byte>.Shared.Rent(nameByteLen), 0, nameByteLen)", code);
+        Assert.Contains("new Span<byte>(nameRented = global::System.Buffers.ArrayPool<byte>.Shared.Rent(nameByteLen), 0, nameByteLen)", code);
         Assert.Contains("UTF8.GetBytes(name", code);
         Assert.Contains("InteropHelpers.SpanToPointer(nameBuf)", code);
         // Cleanup uses ArrayPool return instead of Free
@@ -327,7 +327,7 @@ world test-world {
         Assert.Contains("public static partial void Run();", code);
 
         // Trampoline
-        Assert.Contains("[System.Runtime.InteropServices.UnmanagedCallersOnly(EntryPoint = \"run\")]", code);
+        Assert.Contains("[global::System.Runtime.InteropServices.UnmanagedCallersOnly(EntryPoint = \"run\")]", code);
         Assert.Contains("SkipLocalsInit", code);
         Assert.Contains("Run();", code);
     }
@@ -610,7 +610,7 @@ interface types {
 
         Assert.Contains("public struct Point", code);
         Assert.Contains("public enum Color", code);
-        Assert.Contains("[System.Flags]", code);
+        Assert.Contains("[global::System.Flags]", code);
         Assert.Contains("public enum Permissions", code);
     }
 
@@ -643,7 +643,7 @@ interface types {
         var code = sb.ToString();
 
         // Class structure
-        Assert.Contains("public class Blob : System.IDisposable", code);
+        Assert.Contains("public class Blob : global::System.IDisposable", code);
         Assert.Contains("internal int Handle { get; }", code);
         Assert.Contains("private Blob(int handle)", code);
 
@@ -654,7 +654,7 @@ interface types {
         // Instance methods
         Assert.Contains("public unsafe void Write(", code);
         Assert.Contains("[method]blob.write", code);
-        Assert.Contains("public unsafe System.Collections.Generic.List<byte> Read(", code);
+        Assert.Contains("public unsafe global::System.Collections.Generic.List<byte> Read(", code);
         Assert.Contains("[method]blob.read", code);
 
         // Static method
@@ -688,7 +688,7 @@ interface types {
         var code = sb.ToString();
 
         // Should have a static factory method instead of public constructor
-        Assert.Contains("public class Blob2 : System.IDisposable", code);
+        Assert.Contains("public class Blob2 : global::System.IDisposable", code);
         Assert.Contains("static unsafe Blob2 Create(", code);
         Assert.Contains("NotImplementedException", code);
     }

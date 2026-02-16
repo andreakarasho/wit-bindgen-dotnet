@@ -422,7 +422,7 @@ public class CanonicalAbiTests
     public void WitTypeToCSList()
     {
         var list = new WitListType(WitType.U8);
-        Assert.Equal("System.Collections.Generic.List<byte>", CanonicalAbi.WitTypeToCS(list));
+        Assert.Equal("global::System.Collections.Generic.List<byte>", CanonicalAbi.WitTypeToCS(list));
     }
 
     #endregion

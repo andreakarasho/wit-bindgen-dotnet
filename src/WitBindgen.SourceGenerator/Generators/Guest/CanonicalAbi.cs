@@ -27,6 +27,7 @@ public static class CanonicalAbi
     /// </summary>
     public static List<CoreWasmType> Flatten(WitType type, ITypeContainerResolver? resolver = null)
     {
+        resolver ??= s_resolver;
         var result = new List<CoreWasmType>();
         FlattenInto(type, result, resolver);
         return result;
@@ -219,6 +220,7 @@ public static class CanonicalAbi
     /// </summary>
     public static int FlatCount(WitType type, ITypeContainerResolver? resolver = null)
     {
+        resolver ??= s_resolver;
         return Flatten(type, resolver).Count;
     }
 
@@ -227,6 +229,7 @@ public static class CanonicalAbi
     /// </summary>
     public static bool ShouldSpillParams(WitFuncType func, ITypeContainerResolver? resolver = null)
     {
+        resolver ??= s_resolver;
         int count = 0;
         foreach (var param in func.Parameters)
         {
@@ -242,6 +245,7 @@ public static class CanonicalAbi
     /// </summary>
     public static bool ShouldUseRetPtr(WitFuncType func, ITypeContainerResolver? resolver = null)
     {
+        resolver ??= s_resolver;
         if (func.Results.Length == 0)
             return false;
 
@@ -260,6 +264,7 @@ public static class CanonicalAbi
     /// </summary>
     public static int MemorySize(WitType type, ITypeContainerResolver? resolver = null)
     {
+        resolver ??= s_resolver;
         switch (type.Kind)
         {
             case WitTypeKind.Bool:
@@ -391,6 +396,7 @@ public static class CanonicalAbi
     /// </summary>
     public static int MemoryAlign(WitType type, ITypeContainerResolver? resolver = null)
     {
+        resolver ??= s_resolver;
         switch (type.Kind)
         {
             case WitTypeKind.Bool:
@@ -504,6 +510,75 @@ public static class CanonicalAbi
         };
     }
 
+    private static Dictionary<string, string>? s_typeNameMap;
+    private static ITypeContainerResolver? s_resolver;
+
+    /// <summary>
+    /// Sets a type name resolution map for the current generation scope.
+    /// Maps WIT type names to their resolved C# type names (handling type aliases and cross-package references).
+    /// </summary>
+    public static void SetTypeNameMap(Dictionary<string, string>? map) => s_typeNameMap = map;
+
+    /// <summary>
+    /// Sets the type container resolver for the current generation scope.
+    /// Used to resolve WitCustomType (User) references to their concrete underlying types.
+    /// </summary>
+    public static void SetResolver(ITypeContainerResolver? resolver) => s_resolver = resolver;
+
+    /// <summary>
+    /// Resolves a WitType, unwrapping User (WitCustomType) references to their concrete types.
+    /// Returns the type unchanged if it's not a User type or if no resolver is available.
+    /// </summary>
+    public static WitType ResolveType(WitType type)
+    {
+        if (type.Kind == WitTypeKind.User && type is WitCustomType customType && s_resolver != null)
+        {
+            try
+            {
+                var resolved = customType.Resolve(s_resolver);
+                // Resolve may return another WitAliasType (Kind=User); recurse until concrete.
+                if (resolved.Kind == WitTypeKind.User && resolved != type)
+                    return ResolveType(resolved);
+                if (resolved.Kind != WitTypeKind.User)
+                    return resolved;
+            }
+            catch
+            {
+                // Intentionally fall through to brute-force below.
+            }
+
+            // Standard resolution failed or returned unresolved User type.
+            // Brute-force: search all interfaces in all packages for this type name.
+            var found = BruteForceResolve(customType.Name);
+            if (found != null)
+                return found;
+        }
+        return type;
+    }
+
+    private static WitType? BruteForceResolve(string typeName)
+    {
+        if (s_resolver is not ProjectTypeContainerResolver projectResolver)
+            return null;
+
+        foreach (var pkg in projectResolver.Packages.Values)
+        {
+            foreach (var ver in pkg.Versions.Values)
+            {
+                foreach (var item in ver.Definitions.Items)
+                {
+                    if (item is WitInterface interf &&
+                        interf.Definitions.TryGetType(typeName, out var type))
+                    {
+                        return type;
+                    }
+                }
+            }
+        }
+
+        return null;
+    }
+
     /// <summary>
     /// Returns the C# type name for a WIT type (for high-level API).
     /// </summary>
@@ -533,11 +608,18 @@ public static class CanonicalAbi
             WitTypeKind.Resource => type is WitResourceType rt ? rt.CSharpName : "int",
             WitTypeKind.Borrow => type is WitBorrowType bt
                 ? (bt.ElementType is WitResourceType brt ? brt.CSharpName
-                    : bt.ElementType is WitCustomType bct ? StringUtils.GetName(bct.Name)
+                    : bt.ElementType is WitCustomType bct ? ResolveCustomTypeName(bct.Name)
                     : "int")
                 : "int",
-            WitTypeKind.User => type is WitCustomType ct ? StringUtils.GetName(ct.Name) : "object",
+            WitTypeKind.User => type is WitCustomType ct ? ResolveCustomTypeName(ct.Name) : "object",
             _ => "object"
         };
+    }
+
+    private static string ResolveCustomTypeName(string name)
+    {
+        if (s_typeNameMap != null && s_typeNameMap.TryGetValue(name, out var mapped))
+            return mapped;
+        return StringUtils.GetName(name);
     }
 }

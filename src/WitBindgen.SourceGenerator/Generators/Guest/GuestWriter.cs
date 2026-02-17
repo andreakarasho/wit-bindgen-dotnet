@@ -63,6 +63,10 @@ public static class GuestWriter
             {
                 var moduleName = BuildInterfaceModuleName(packageName, version, interf.Name);
 
+                var typeMap = BuildTypeNameMap(interf.Definitions, null);
+                CanonicalAbi.SetTypeNameMap(typeMap);
+                CanonicalAbi.SetResolver(resolver);
+
                 // Write both types and any function stubs for the interface
                 sb.AppendLine($"namespace Wit.{GetNamespacePath(packageName)}");
                 using (sb.Block())
@@ -75,6 +79,9 @@ public static class GuestWriter
                 }
                 sb.AppendLine();
                 hasContent = true;
+
+                CanonicalAbi.SetTypeNameMap(null);
+                CanonicalAbi.SetResolver(null);
             }
         }
 
@@ -99,6 +106,10 @@ public static class GuestWriter
         sb.AppendLine();
 
         var namespaceName = $"Wit.{GetNamespacePath(packageName)}";
+
+        var worldTypeMap = BuildTypeNameMap(world.Definitions, resolver);
+        CanonicalAbi.SetTypeNameMap(worldTypeMap);
+        CanonicalAbi.SetResolver(resolver);
 
         sb.AppendLine($"namespace {namespaceName}");
         using (sb.Block())
@@ -152,6 +163,9 @@ public static class GuestWriter
                 }
             }
         }
+
+        CanonicalAbi.SetTypeNameMap(null);
+        CanonicalAbi.SetResolver(null);
 
         var hintName = $"Wit.{packageName.FullName.Replace(":", ".").Replace("/", ".")}.{worldName}.g.cs";
         context.AddSource(SanitizeHintName(hintName), sb.ToString());
@@ -295,4 +309,65 @@ public static class GuestWriter
     {
         return name.Replace("@", "_").Replace(":", "_");
     }
+
+    private static Dictionary<string, string> BuildTypeNameMap(
+        WitTypeDefinitions definitions,
+        ITypeContainerResolver? resolver)
+    {
+        var map = new Dictionary<string, string>(StringComparer.Ordinal);
+
+        foreach (var item in definitions.Items)
+        {
+            if (item is WitTypeAlias alias)
+            {
+                // Type alias (e.g., type type-path = string;) → resolve to underlying C# type
+                map[alias.Name] = CanonicalAbi.WitTypeToCS(alias.Type);
+            }
+            else if (item is WitUse use && resolver != null)
+            {
+                // use-imported types from another package/interface
+                var nsPath = GetNamespacePath(use.Package.PackageName);
+                var interfaceName = StringUtils.GetName(use.Interface);
+
+                // Try to resolve the source interface to check for type aliases
+                ITypeContainer? interfaceContainer = null;
+                try
+                {
+                    var sourceContainer = resolver.Resolve(use.Package);
+                    sourceContainer.TryGetContainer(use.Interface, out interfaceContainer);
+                }
+                catch
+                {
+                    // ignore resolution failures
+                }
+
+                foreach (var useItem in use.Items)
+                {
+                    // Check if the source type is a type alias to a primitive
+                    if (interfaceContainer != null &&
+                        interfaceContainer.TryGetType(useItem.Name, out var sourceType) &&
+                        IsPrimitiveKind(sourceType.Kind))
+                    {
+                        map[useItem.Alias] = CanonicalAbi.WitTypeToCS(sourceType);
+                    }
+                    else
+                    {
+                        // Complex type from another package - use fully qualified name
+                        var typeName = StringUtils.GetName(useItem.Name);
+                        map[useItem.Alias] = $"global::Wit.{nsPath}.{interfaceName}.{typeName}";
+                    }
+                }
+            }
+        }
+
+        return map;
+    }
+
+    private static bool IsPrimitiveKind(WitTypeKind kind) => kind switch
+    {
+        WitTypeKind.Bool or WitTypeKind.U8 or WitTypeKind.U16 or WitTypeKind.U32 or WitTypeKind.U64
+            or WitTypeKind.S8 or WitTypeKind.S16 or WitTypeKind.S32 or WitTypeKind.S64
+            or WitTypeKind.F32 or WitTypeKind.F64 or WitTypeKind.Char or WitTypeKind.String => true,
+        _ => false
+    };
 }

@@ -100,7 +100,17 @@ world hello-world {
     <PropertyGroup>
         <TargetFramework>net10.0</TargetFramework>
         <RuntimeIdentifier>wasi-wasm</RuntimeIdentifier>
+        <UseAppHost>false</UseAppHost>
+        <PublishTrimmed>true</PublishTrimmed>
+        <SelfContained>true</SelfContained>
+        <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+        <MSBuildEnableWorkloadResolver>false</MSBuildEnableWorkloadResolver>
     </PropertyGroup>
+
+    <ItemGroup>
+        <PackageReference Include="Microsoft.DotNet.ILCompiler.LLVM" Version="10.0.0-*" />
+        <PackageReference Include="runtime.$(NETCoreSdkPortableRuntimeIdentifier).Microsoft.DotNet.ILCompiler.LLVM" Version="10.0.0-*" />
+    </ItemGroup>
 
     <ItemGroup>
         <PackageReference Include="WitBindgen.SourceGenerator" Version="0.1.0">
@@ -114,14 +124,6 @@ world hello-world {
         <WasmComponentTypeWit Include="wit\hello.wit" />
     </ItemGroup>
 </Project>
-```
-
-The NuGet package sets WASI-WASM defaults (`AllowUnsafeBlocks`, `SelfContained`, etc.) and adds the NativeAOT-LLVM compiler packages automatically. To override the LLVM version:
-
-```xml
-<PropertyGroup>
-    <NativeAotLlvmVersion>10.0.0-preview.5.25277.114</NativeAotLlvmVersion>
-</PropertyGroup>
 ```
 
 **3. Implement the exports:**

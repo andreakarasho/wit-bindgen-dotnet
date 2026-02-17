@@ -645,7 +645,7 @@ interface types {
         // Class structure
         Assert.Contains("public class Blob : global::System.IDisposable", code);
         Assert.Contains("internal int Handle { get; }", code);
-        Assert.Contains("private Blob(int handle)", code);
+        Assert.Contains("internal Blob(int handle)", code);
 
         // Constructor
         Assert.Contains("public unsafe Blob(", code);
@@ -719,6 +719,532 @@ interface types {
         Assert.Single(resource.StaticMethods); // merge is static method
         Assert.Equal("write", resource.Methods[0].Name);
         Assert.Equal("merge", resource.StaticMethods[0].Name);
+    }
+
+    #endregion
+
+    #region ECS WIT - Variant, Record, Resource, Borrow Code Generation
+
+    [Fact]
+    public void GenerateVariantWithMixedPayloads()
+    {
+        var wit = @"
+package tecs:ecs;
+
+interface ecs {
+    variant stage-label {
+        startup,
+        first,
+        pre-update,
+        update,
+        post-update,
+        last,
+        custom(string),
+    }
+}
+";
+        var directory = Wit.Parse(wit);
+        var interf = directory.Packages.Values.First().Versions.Values.First()
+            .Definitions.Items[0] as WitInterface;
+        var variant = interf!.Definitions.Items[0] as WitVariant;
+
+        var sb = new IndentedStringBuilder();
+        GuestTypeWriter.WriteVariant(sb, variant!);
+        var code = sb.ToString();
+
+        Assert.Contains("public struct StageLabel", code);
+        Assert.Contains("public enum Case", code);
+        Assert.Contains("Startup = 0", code);
+        Assert.Contains("First = 1", code);
+        Assert.Contains("PreUpdate = 2", code);
+        Assert.Contains("Update = 3", code);
+        Assert.Contains("PostUpdate = 4", code);
+        Assert.Contains("Last = 5", code);
+        Assert.Contains("Custom = 6", code);
+        Assert.Contains("CreateStartup()", code);
+        Assert.Contains("CreateCustom(string val)", code);
+    }
+
+    [Fact]
+    public void GenerateVariantAllPayloadCases()
+    {
+        var wit = @"
+package tecs:ecs;
+
+interface ecs {
+    type type-path = string;
+
+    variant query-term {
+        ref(type-path),
+        mut(type-path),
+        %with(type-path),
+        without(type-path),
+    }
+}
+";
+        var directory = Wit.Parse(wit);
+        var interf = directory.Packages.Values.First().Versions.Values.First()
+            .Definitions.Items[0] as WitInterface;
+        var variant = interf!.Definitions.Items.OfType<WitVariant>().First();
+
+        var sb = new IndentedStringBuilder();
+        GuestTypeWriter.WriteVariant(sb, variant!);
+        var code = sb.ToString();
+
+        Assert.Contains("public struct QueryTerm", code);
+        Assert.Contains("Ref = 0", code);
+        Assert.Contains("Mut = 1", code);
+        Assert.Contains("With = 2", code);
+        Assert.Contains("Without = 3", code);
+    }
+
+    [Fact]
+    public void GenerateEcsEntityRecord()
+    {
+        var wit = @"
+package tecs:ecs;
+
+interface ecs {
+    record entity {
+        id: s32,
+        generation: s32,
+    }
+}
+";
+        var directory = Wit.Parse(wit);
+        var interf = directory.Packages.Values.First().Versions.Values.First()
+            .Definitions.Items[0] as WitInterface;
+        var record = interf!.Definitions.Items[0] as WitRecord;
+
+        var sb = new IndentedStringBuilder();
+        GuestTypeWriter.WriteRecord(sb, record!);
+        var code = sb.ToString();
+
+        Assert.Contains("public struct Entity", code);
+        Assert.Contains("public int Id;", code);
+        Assert.Contains("public int Generation;", code);
+    }
+
+    [Fact]
+    public void GenerateResourceWithBorrowParams()
+    {
+        var wit = @"
+package tecs:ecs;
+
+interface ecs {
+    resource system {
+        constructor(name: string);
+        after: func(other: borrow<system>);
+        before: func(other: borrow<system>);
+    }
+}
+";
+        var directory = Wit.Parse(wit);
+        var interf = directory.Packages.Values.First().Versions.Values.First()
+            .Definitions.Items[0] as WitInterface;
+        var resource = interf!.Definitions.Items[0] as WitResource;
+
+        var sb = new IndentedStringBuilder();
+        GuestImportWriter.WriteImportResource(sb, "tecs:ecs/ecs", resource!);
+        var code = sb.ToString();
+
+        Assert.Contains("public class System : global::System.IDisposable", code);
+        Assert.Contains("internal int Handle { get; }", code);
+        Assert.Contains("internal System(int handle)", code);
+
+        // Constructor
+        Assert.Contains("[constructor]system", code);
+
+        // Instance methods with borrow params
+        Assert.Contains("[method]system.after", code);
+        Assert.Contains("[method]system.before", code);
+        Assert.Contains("public unsafe void After(", code);
+        Assert.Contains("public unsafe void Before(", code);
+
+        // Dispose
+        Assert.Contains("[resource-drop]system", code);
+    }
+
+    [Fact]
+    public void GenerateResourceWithRecordReturnAndEntityParam()
+    {
+        var wit = @"
+package tecs:ecs;
+
+interface ecs {
+    record entity {
+        id: s32,
+        generation: s32,
+    }
+
+    resource commands {
+        despawn: func(entity: entity);
+    }
+}
+";
+        var directory = Wit.Parse(wit);
+        var interf = directory.Packages.Values.First().Versions.Values.First()
+            .Definitions.Items[0] as WitInterface;
+        var resource = interf!.Definitions.Items.OfType<WitResource>().First();
+
+        var sb = new IndentedStringBuilder();
+        GuestImportWriter.WriteImportResource(sb, "tecs:ecs/ecs", resource!);
+        var code = sb.ToString();
+
+        Assert.Contains("public class Commands : global::System.IDisposable", code);
+        Assert.Contains("[method]commands.despawn", code);
+        Assert.Contains("public unsafe void Despawn(", code);
+    }
+
+    [Fact]
+    public void GenerateImportWithBorrowAndRecordParam()
+    {
+        var wit = @"
+package tecs:example;
+
+world guest {
+    record position { x: f32, y: f32 }
+
+    import set-position: func(q: borrow<query>, index: u8, value: position);
+}
+";
+        var directory = Wit.Parse(wit);
+        var world = directory.Packages.Values.First().Versions.Values.First().Worlds["guest"];
+        var import = world.Definitions.Items.OfType<WitWorldImport>().First();
+        var funcType = import.Type as WitFuncType;
+
+        var sb = new IndentedStringBuilder();
+        GuestImportWriter.WriteImportFunction(sb, "Imports", "$root", "set-position", funcType!);
+        var code = sb.ToString();
+
+        // DllImport stub
+        Assert.Contains("DllImport(\"$root\", EntryPoint = \"set-position\")", code);
+        Assert.Contains("WasmImportLinkage", code);
+
+        // High-level wrapper
+        Assert.Contains("SetPosition(", code);
+    }
+
+    [Fact]
+    public void GenerateImportReturningList()
+    {
+        var wit = @"
+package tecs:example;
+
+world guest {
+    record position { x: f32, y: f32 }
+
+    import get-positions: func(q: borrow<query>, index: u8) -> list<position>;
+}
+";
+        var directory = Wit.Parse(wit);
+        var world = directory.Packages.Values.First().Versions.Values.First().Worlds["guest"];
+        var import = world.Definitions.Items.OfType<WitWorldImport>().First();
+        var funcType = import.Type as WitFuncType;
+
+        var sb = new IndentedStringBuilder();
+        GuestImportWriter.WriteImportFunction(sb, "Imports", "$root", "get-positions", funcType!);
+        var code = sb.ToString();
+
+        Assert.Contains("DllImport(\"$root\", EntryPoint = \"get-positions\")", code);
+        Assert.Contains("GetPositions(", code);
+    }
+
+    [Fact]
+    public void GenerateExportWithResourceParam()
+    {
+        var wit = @"
+package tecs:example;
+
+world guest {
+    export setup: func(app: app);
+}
+";
+        var directory = Wit.Parse(wit);
+        var world = directory.Packages.Values.First().Versions.Values.First().Worlds["guest"];
+        var export = world.Definitions.Items.OfType<WitWorldExport>().First();
+        var funcType = export.Type as WitFuncType;
+
+        var sb = new IndentedStringBuilder();
+        GuestExportWriter.WriteExportFunction(sb, "setup", "setup", funcType!);
+        var code = sb.ToString();
+
+        Assert.Contains("UnmanagedCallersOnly(EntryPoint = \"setup\")", code);
+        Assert.Contains("Setup(", code);
+    }
+
+    [Fact]
+    public void GenerateExportWithOptionParams()
+    {
+        var wit = @"
+package tecs:example;
+
+world guest {
+    export run-system: func(index: u32, query: option<query>, commands: option<commands>);
+}
+";
+        var directory = Wit.Parse(wit);
+        var world = directory.Packages.Values.First().Versions.Values.First().Worlds["guest"];
+        var export = world.Definitions.Items.OfType<WitWorldExport>().First();
+        var funcType = export.Type as WitFuncType;
+
+        var sb = new IndentedStringBuilder();
+        GuestExportWriter.WriteExportFunction(sb, "run-system", "run-system", funcType!);
+        var code = sb.ToString();
+
+        Assert.Contains("UnmanagedCallersOnly(EntryPoint = \"run-system\")", code);
+        Assert.Contains("RunSystem(", code);
+        // The trampoline should lift option discriminant
+        Assert.Contains("!= 0", code);
+    }
+
+    [Fact]
+    public void GenerateExportRecordParam()
+    {
+        var wit = @"
+package tecs:example;
+
+world guest {
+    record position { x: f32, y: f32 }
+
+    export move: func(pos: position) -> position;
+}
+";
+        var directory = Wit.Parse(wit);
+        var world = directory.Packages.Values.First().Versions.Values.First().Worlds["guest"];
+        var export = world.Definitions.Items.OfType<WitWorldExport>().First();
+        var funcType = export.Type as WitFuncType;
+
+        var sb = new IndentedStringBuilder();
+        GuestExportWriter.WriteExportFunction(sb, "move", "move", funcType!);
+        var code = sb.ToString();
+
+        Assert.Contains("UnmanagedCallersOnly(EntryPoint = \"move\")", code);
+        Assert.Contains("Move(", code);
+    }
+
+    [Fact]
+    public void FullPipelineEcsInterface()
+    {
+        var compilation = CSharpCompilation.Create("TestAssembly",
+            new[] { CSharpSyntaxTree.ParseText("") },
+            new[] { MetadataReference.CreateFromFile(typeof(object).Assembly.Location) },
+            new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
+
+        var generator = new ComponentGuestGenerator();
+
+        var witContent = @"
+package tecs:ecs;
+
+interface ecs {
+    resource app {
+        add-systems: func(stage: stage-label, systems: list<borrow<system>>);
+    }
+
+    resource system {
+        constructor(name: string);
+        add-commands: func();
+        add-query: func(query: list<query-term>);
+        after: func(other: borrow<system>);
+        before: func(other: borrow<system>);
+    }
+
+    resource commands {
+        spawn: func() -> entity-commands;
+        entity: func(entity: entity) -> entity-commands;
+        despawn: func(entity: entity);
+        remove-component: func(entity: entity, type-path: type-path);
+    }
+
+    resource entity-commands {
+        id: func() -> entity;
+        remove: func(types: list<type-path>);
+        despawn: func();
+    }
+
+    record entity {
+        id: s32,
+        generation: s32,
+    }
+
+    resource query {
+        iter: func() -> option<entity>;
+    }
+
+    type type-path = string;
+
+    variant stage-label {
+        startup,
+        first,
+        pre-update,
+        update,
+        post-update,
+        last,
+        custom(string),
+    }
+
+    variant query-term {
+        ref(type-path),
+        mut(type-path),
+        %with(type-path),
+        without(type-path),
+    }
+}
+";
+        var additionalText = new InMemoryAdditionalText("test/ecs.wit", witContent);
+
+        var driver = CSharpGeneratorDriver.Create(generator)
+            .AddAdditionalTexts(ImmutableArray.Create<AdditionalText>(additionalText));
+
+        driver = (CSharpGeneratorDriver)driver.RunGeneratorsAndUpdateCompilation(
+            compilation, out _, out _);
+
+        var result = driver.GetRunResult();
+        Assert.NotEmpty(result.GeneratedTrees);
+
+        var generatedCode = result.GeneratedTrees
+            .Select(t => t.GetText().ToString())
+            .Aggregate((a, b) => a + "\n" + b);
+
+        // Type definitions
+        Assert.Contains("public struct Entity", generatedCode);
+        Assert.Contains("public struct StageLabel", generatedCode);
+        Assert.Contains("public struct QueryTerm", generatedCode);
+
+        // Resource classes
+        Assert.Contains("public class App : global::System.IDisposable", generatedCode);
+        Assert.Contains("public class Commands : global::System.IDisposable", generatedCode);
+        Assert.Contains("public class Query : global::System.IDisposable", generatedCode);
+    }
+
+    [Fact]
+    public void FullPipelineEcsExampleWorld()
+    {
+        var compilation = CSharpCompilation.Create("TestAssembly",
+            new[] { CSharpSyntaxTree.ParseText("") },
+            new[] { MetadataReference.CreateFromFile(typeof(object).Assembly.Location) },
+            new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
+
+        var generator = new ComponentGuestGenerator();
+
+        var ecsContent = @"
+package tecs:ecs;
+
+interface ecs {
+    resource app {
+        add-systems: func(stage: stage-label, systems: list<borrow<system>>);
+    }
+
+    resource system {
+        constructor(name: string);
+        add-commands: func();
+        add-query: func(query: list<query-term>);
+        after: func(other: borrow<system>);
+        before: func(other: borrow<system>);
+    }
+
+    resource commands {
+        spawn: func() -> entity-commands;
+        entity: func(entity: entity) -> entity-commands;
+        despawn: func(entity: entity);
+        remove-component: func(entity: entity, type-path: type-path);
+    }
+
+    resource entity-commands {
+        id: func() -> entity;
+        remove: func(types: list<type-path>);
+        despawn: func();
+    }
+
+    record entity {
+        id: s32,
+        generation: s32,
+    }
+
+    resource query {
+        iter: func() -> option<entity>;
+    }
+
+    type type-path = string;
+
+    variant stage-label {
+        startup,
+        first,
+        pre-update,
+        update,
+        post-update,
+        last,
+        custom(string),
+    }
+
+    variant query-term {
+        ref(type-path),
+        mut(type-path),
+        %with(type-path),
+        without(type-path),
+    }
+}
+";
+        var exampleContent = @"
+package tecs:example;
+
+world guest {
+    import tecs:ecs/ecs;
+
+    use tecs:ecs/ecs.{app, query, commands, entity};
+
+    import get-position: func(q: borrow<query>, index: u8) -> position;
+    import set-position: func(q: borrow<query>, index: u8, value: position);
+    import get-velocity: func(q: borrow<query>, index: u8) -> velocity;
+    import set-velocity: func(q: borrow<query>, index: u8, value: velocity);
+    import commands-set-position: func(cmds: borrow<commands>, entity: entity, value: position);
+    import commands-set-velocity: func(cmds: borrow<commands>, entity: entity, value: velocity);
+
+    import get-positions: func(q: borrow<query>, index: u8) -> list<position>;
+    import set-positions: func(q: borrow<query>, index: u8, values: list<position>);
+    import get-velocities: func(q: borrow<query>, index: u8) -> list<velocity>;
+    import set-velocities: func(q: borrow<query>, index: u8, values: list<velocity>);
+
+    record position { x: f32, y: f32 }
+    record velocity { x: f32, y: f32 }
+
+    export setup: func(app: app);
+    export run-system: func(index: u32, query: option<query>, commands: option<commands>);
+}
+";
+        var ecsText = new InMemoryAdditionalText("test/ecs/ecs.wit", ecsContent);
+        var exampleText = new InMemoryAdditionalText("test/example/example.wit", exampleContent);
+
+        var driver = CSharpGeneratorDriver.Create(generator)
+            .AddAdditionalTexts(ImmutableArray.Create<AdditionalText>(ecsText, exampleText));
+
+        driver = (CSharpGeneratorDriver)driver.RunGeneratorsAndUpdateCompilation(
+            compilation, out _, out _);
+
+        var result = driver.GetRunResult();
+        Assert.NotEmpty(result.GeneratedTrees);
+
+        var generatedCode = result.GeneratedTrees
+            .Select(t => t.GetText().ToString())
+            .Aggregate((a, b) => a + "\n" + b);
+
+        // ECS package types should be generated
+        Assert.Contains("public struct Entity", generatedCode);
+        Assert.Contains("public struct StageLabel", generatedCode);
+
+        // Example package local types
+        Assert.Contains("public struct Position", generatedCode);
+        Assert.Contains("public struct Velocity", generatedCode);
+
+        // Imports with borrow params
+        Assert.Contains("DllImport", generatedCode);
+        Assert.Contains("get-position", generatedCode);
+        Assert.Contains("set-position", generatedCode);
+
+        // Exports
+        Assert.Contains("UnmanagedCallersOnly", generatedCode);
+        Assert.Contains("setup", generatedCode);
+        Assert.Contains("run-system", generatedCode);
     }
 
     #endregion

@@ -6,7 +6,7 @@ public record WitEnum(
     EquatableArray<WitEnumValue> Values
 ) : WitEnumBase(Package, Name, Values)
 {
-    public override WitType Type { get; } = new WitEnumType(Package, Name);
+    public override WitType Type { get; } = new WitEnumType(Package, Name, Values.Length);
 }
 
 

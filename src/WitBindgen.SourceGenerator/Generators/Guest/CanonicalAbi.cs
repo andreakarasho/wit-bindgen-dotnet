@@ -175,23 +175,24 @@ public static class CanonicalAbi
 
     private static void FlattenVariantPayload(WitVariantType variant, List<CoreWasmType> result, ITypeContainerResolver? resolver)
     {
-        var maxFlat = new List<CoreWasmType>();
-
+        // Canonical ABI flatten_variant: per-position join across ALL cases (not just the longest).
+        var flat = new List<CoreWasmType>();
         foreach (var @case in variant.Values)
         {
-            if (@case.Type is not null)
+            if (@case.Type is null)
+                continue;
+
+            var caseFlat = Flatten(@case.Type, resolver);
+            for (int i = 0; i < caseFlat.Count; i++)
             {
-                var caseFlat = Flatten(@case.Type, resolver);
-                if (caseFlat.Count > maxFlat.Count)
-                {
-                    // Pad the new max to cover the old max, then swap
-                    var padded = new List<CoreWasmType>(caseFlat);
-                    maxFlat = padded;
-                }
+                if (i < flat.Count)
+                    flat[i] = Join(flat[i], caseFlat[i]);
+                else
+                    flat.Add(caseFlat[i]);
             }
         }
 
-        result.AddRange(maxFlat);
+        result.AddRange(flat);
     }
 
     /// <summary>
@@ -205,14 +206,23 @@ public static class CanonicalAbi
         {
             var aType = i < a.Count ? a[i] : CoreWasmType.I32;
             var bType = i < b.Count ? b[i] : CoreWasmType.I32;
-            // Use the "wider" type: i64 > f64 > f32 > i32
-            output.Add(MaxType(aType, bType));
+            output.Add(Join(aType, bType));
         }
     }
 
-    private static CoreWasmType MaxType(CoreWasmType a, CoreWasmType b)
+    /// <summary>
+    /// Canonical ABI core-type join: equal types stay; (i32,f32) collapses to i32;
+    /// any other mismatch widens to i64. Used when flattening variants/results whose
+    /// cases flatten to differently-typed core values at the same position.
+    /// </summary>
+    private static CoreWasmType Join(CoreWasmType a, CoreWasmType b)
     {
-        return (CoreWasmType)Math.Max((int)a, (int)b);
+        if (a == b)
+            return a;
+        if ((a == CoreWasmType.I32 && b == CoreWasmType.F32) ||
+            (a == CoreWasmType.F32 && b == CoreWasmType.I32))
+            return CoreWasmType.I32;
+        return CoreWasmType.I64;
     }
 
     /// <summary>
@@ -278,10 +288,11 @@ public static class CanonicalAbi
             case WitTypeKind.S32:
             case WitTypeKind.Char:
             case WitTypeKind.F32:
-            case WitTypeKind.Enum:
             case WitTypeKind.Resource:
             case WitTypeKind.Borrow:
                 return 4;
+            case WitTypeKind.Enum:
+                return EnumSizeOf(type);
             case WitTypeKind.U64:
             case WitTypeKind.S64:
             case WitTypeKind.F64:
@@ -336,20 +347,22 @@ public static class CanonicalAbi
             case WitTypeKind.Variant:
                 if (type is WitVariantType variantType)
                 {
+                    int discSize = VariantDiscSize(variantType);
                     int maxPayload = 0;
-                    int maxAlign = 4; // discriminant is i32
+                    int maxCaseAlign = 1;
                     foreach (var c in variantType.Values)
                     {
                         if (c.Type is not null)
                         {
                             maxPayload = Math.Max(maxPayload, MemorySize(c.Type, resolver));
-                            maxAlign = Math.Max(maxAlign, MemoryAlign(c.Type, resolver));
+                            maxCaseAlign = Math.Max(maxCaseAlign, MemoryAlign(c.Type, resolver));
                         }
                     }
-                    var discOffset = AlignTo(4, maxAlign);
-                    return AlignTo(discOffset + maxPayload, maxAlign);
+                    var align = Math.Max(discSize, maxCaseAlign);
+                    var payloadOffset = AlignTo(discSize, maxCaseAlign);
+                    return AlignTo(payloadOffset + maxPayload, align);
                 }
-                return 4;
+                return 1;
             case WitTypeKind.User:
                 if (type is WitCustomType customType && resolver != null)
                 {
@@ -386,9 +399,10 @@ public static class CanonicalAbi
 
         var payloadAlign = Math.Max(okAlign, errAlign);
         var payloadSize = Math.Max(okSize, errSize);
-        var discAlign = Math.Max(4, payloadAlign);
-        var offset = AlignTo(4, payloadAlign);
-        return AlignTo(offset + payloadSize, discAlign);
+        var discSize = DiscriminantSize(2); // result has exactly 2 cases (ok, err) -> u8
+        var align = Math.Max(discSize, payloadAlign);
+        var offset = AlignTo(discSize, payloadAlign);
+        return AlignTo(offset + payloadSize, align);
     }
 
     /// <summary>
@@ -410,13 +424,14 @@ public static class CanonicalAbi
             case WitTypeKind.S32:
             case WitTypeKind.Char:
             case WitTypeKind.F32:
-            case WitTypeKind.Enum:
             case WitTypeKind.Resource:
             case WitTypeKind.Borrow:
             case WitTypeKind.Flags:
             case WitTypeKind.String:
             case WitTypeKind.List:
                 return 4;
+            case WitTypeKind.Enum:
+                return EnumSizeOf(type);
             case WitTypeKind.U64:
             case WitTypeKind.S64:
             case WitTypeKind.F64:
@@ -448,7 +463,7 @@ public static class CanonicalAbi
             case WitTypeKind.Variant:
                 if (type is WitVariantType variantType)
                 {
-                    int maxAlign = 4;
+                    int maxAlign = VariantDiscSize(variantType);
                     foreach (var c in variantType.Values)
                     {
                         if (c.Type is not null)
@@ -456,7 +471,7 @@ public static class CanonicalAbi
                     }
                     return maxAlign;
                 }
-                return 4;
+                return 1;
             case WitTypeKind.User:
                 if (type is WitCustomType customType && resolver != null)
                     return MemoryAlign(customType.Resolve(resolver), resolver);
@@ -484,7 +499,7 @@ public static class CanonicalAbi
                 break;
         }
 
-        return Math.Max(4, Math.Max(okAlign, errAlign));
+        return Math.Max(DiscriminantSize(2), Math.Max(okAlign, errAlign));
     }
 
     /// <summary>
@@ -494,6 +509,49 @@ public static class CanonicalAbi
     {
         return (value + align - 1) & ~(align - 1);
     }
+
+    /// <summary>
+    /// Byte size of the discriminant for a variant/enum with the given number of cases,
+    /// per the canonical ABI discriminant_type: u8 for ≤256 cases, u16 for ≤65536, else u32.
+    /// </summary>
+    public static int DiscriminantSize(int caseCount)
+        => caseCount <= (1 << 8) ? 1 : caseCount <= (1 << 16) ? 2 : 4;
+
+    /// <summary>
+    /// C# pointer-cast keyword for an unsigned little-endian integer load/store of the given byte width.
+    /// </summary>
+    public static string IntStoreKeyword(int byteSize) => byteSize switch
+    {
+        1 => "byte",
+        2 => "ushort",
+        4 => "int",
+        8 => "long",
+        _ => "int"
+    };
+
+    /// <summary>Byte size of an enum's discriminant in linear memory (1/2/4 by label count).</summary>
+    public static int EnumSizeOf(WitType type)
+        => ResolveType(type) is WitEnumType et ? DiscriminantSize(et.LabelCount) : 1;
+
+    /// <summary>Byte size of a variant's discriminant in linear memory (1/2/4 by case count).</summary>
+    public static int VariantDiscSize(WitVariantType variant) => DiscriminantSize(variant.Values.Length);
+
+    /// <summary>Max alignment among a variant's case payloads (minimum 1).</summary>
+    public static int VariantMaxCaseAlign(WitVariantType variant, ITypeContainerResolver? resolver = null)
+    {
+        resolver ??= s_resolver;
+        int a = 1;
+        foreach (var c in variant.Values)
+            if (c.Type is not null)
+                a = Math.Max(a, MemoryAlign(c.Type, resolver));
+        return a;
+    }
+
+    /// <summary>
+    /// Byte offset of a variant's payload: the discriminant size aligned up to the max case alignment.
+    /// </summary>
+    public static int VariantPayloadOffset(WitVariantType variant, ITypeContainerResolver? resolver = null)
+        => AlignTo(VariantDiscSize(variant), VariantMaxCaseAlign(variant, resolver));
 
     /// <summary>
     /// Returns the C# type string for a core WASM type used in DllImport signatures.
@@ -580,7 +638,47 @@ public static class CanonicalAbi
     }
 
     /// <summary>
+    /// Returns true if the WIT element type is blittable — i.e., its WASM linear memory layout
+    /// matches the C# in-memory layout and can be bulk-copied with MemoryMarshal.Cast or Buffer.MemoryCopy.
+    /// Excludes bool (1 byte in WASM but may differ in C#) and enum (layout-dependent).
+    /// </summary>
+    public static bool IsBlittablePrimitive(WitType type)
+    {
+        type = ResolveType(type);
+        return type.Kind switch
+        {
+            WitTypeKind.U8 or WitTypeKind.S8 or
+            WitTypeKind.U16 or WitTypeKind.S16 or
+            WitTypeKind.U32 or WitTypeKind.S32 or
+            WitTypeKind.U64 or WitTypeKind.S64 or
+            WitTypeKind.F32 or WitTypeKind.F64 => true,
+            _ => false
+        };
+    }
+
+    /// <summary>
+    /// Returns true if the type is blittable — either a blittable primitive or a record
+    /// whose fields are all blittable. Blittable records can use MemoryMarshal.Cast for
+    /// zero-copy list serialization since canonical ABI memory layout matches C# Sequential layout.
+    /// </summary>
+    public static bool IsBlittable(WitType type)
+    {
+        type = ResolveType(type);
+        if (IsBlittablePrimitive(type)) return true;
+        if (type is WitRecordType rt && rt.Fields.Length > 0)
+        {
+            foreach (var field in rt.Fields)
+            {
+                if (!IsBlittable(field.Type)) return false;
+            }
+            return true;
+        }
+        return false;
+    }
+
+    /// <summary>
     /// Returns the C# type name for a WIT type (for high-level API).
+    /// Lists map to T[] (arrays) by default.
     /// </summary>
     public static string WitTypeToCS(WitType type)
     {
@@ -599,21 +697,54 @@ public static class CanonicalAbi
             WitTypeKind.F64 => "double",
             WitTypeKind.Char => "uint",
             WitTypeKind.String => "string",
-            WitTypeKind.List => type is WitListType lt ? $"global::System.Collections.Generic.List<{WitTypeToCS(lt.ElementType)}>" : "object",
+            WitTypeKind.List => type is WitListType lt
+                ? (IsBlittable(ResolveType(lt.ElementType)) && !IsBlittablePrimitive(ResolveType(lt.ElementType))
+                    ? $"WitBindgen.Runtime.OwnedSpan<{WitTypeToCS(lt.ElementType)}>"
+                    : $"{WitTypeToCS(lt.ElementType)}[]")
+                : "object",
             WitTypeKind.Record => type is WitRecordType rt ? rt.CSharpName : "object",
             WitTypeKind.Enum => type is WitEnumType et ? et.CSharpName : "int",
             WitTypeKind.Flags => type is WitFlagsType ft ? ft.CSharpName : "int",
             WitTypeKind.Variant => type is WitVariantType vt ? vt.CSharpName : "object",
             WitTypeKind.Option => type is WitOptionType ot ? $"{WitTypeToCS(ot.ElementType)}?" : "object",
+            WitTypeKind.Tuple => type is WitTupleType tplt ? TupleToCS(tplt) : "object",
             WitTypeKind.Resource => type is WitResourceType rt ? rt.CSharpName : "int",
             WitTypeKind.Borrow => type is WitBorrowType bt
                 ? (bt.ElementType is WitResourceType brt ? brt.CSharpName
                     : bt.ElementType is WitCustomType bct ? ResolveCustomTypeName(bct.Name)
                     : "int")
                 : "int",
-            WitTypeKind.User => type is WitCustomType ct ? ResolveCustomTypeName(ct.Name) : "object",
+            WitTypeKind.User => type is WitCustomType ct ? UserTypeToCS(ct) : "object",
             _ => "object"
         };
+    }
+
+    /// <summary>
+    /// Returns the C# type for a WIT list type when used as an input parameter.
+    /// For blittable element types, returns ReadOnlySpan&lt;T&gt; to allow zero-copy.
+    /// For non-blittable element types (string, record, etc.), returns T[].
+    /// For non-list types, delegates to WitTypeToCS.
+    /// </summary>
+    public static string WitTypeToCSParam(WitType type)
+    {
+        if (type.Kind == WitTypeKind.List && type is WitListType lt)
+        {
+            var elemType = ResolveType(lt.ElementType);
+            if (IsBlittable(elemType))
+            {
+                return $"global::System.ReadOnlySpan<{WitTypeToCS(lt.ElementType)}>";
+            }
+            return $"{WitTypeToCS(lt.ElementType)}[]";
+        }
+        return WitTypeToCS(type);
+    }
+
+    /// <summary>
+    /// Returns the element C# type for a WIT list type.
+    /// </summary>
+    public static string WitListElementTypeToCS(WitListType lt)
+    {
+        return WitTypeToCS(lt.ElementType);
     }
 
     private static string ResolveCustomTypeName(string name)
@@ -621,5 +752,45 @@ public static class CanonicalAbi
         if (s_typeNameMap != null && s_typeNameMap.TryGetValue(name, out var mapped))
             return mapped;
         return StringUtils.GetName(name);
+    }
+
+    /// <summary>
+    /// C# type name for a WIT named-type reference. A type alias to a structural type
+    /// (e.g. `type my-len = u32`, `type name = string`, `type bytes = list&lt;u8&gt;`) has NO C#
+    /// declaration, so it must resolve to the underlying type at the use-site. Named types
+    /// (record/variant/enum/flags/resource) and unresolved/cross-package references keep their
+    /// mapped name (preserving fully-qualified names from the type-name map).
+    /// </summary>
+    private static string UserTypeToCS(WitCustomType ct)
+    {
+        var resolved = ResolveType(ct);
+        switch (resolved.Kind)
+        {
+            case WitTypeKind.User:
+            case WitTypeKind.Record:
+            case WitTypeKind.Variant:
+            case WitTypeKind.Enum:
+            case WitTypeKind.Flags:
+            case WitTypeKind.Resource:
+                return ResolveCustomTypeName(ct.Name);
+            default:
+                // Alias to a structural type — emit the underlying C# type.
+                return WitTypeToCS(resolved);
+        }
+    }
+
+    /// <summary>
+    /// Maps a WIT tuple to a C# ValueTuple. Arity 1 uses System.ValueTuple&lt;T&gt; (since
+    /// "(T)" is just a parenthesized expression, not a 1-tuple); arity >= 2 uses "(T1, T2, ...)".
+    /// Elements are accessed via .Item1, .Item2, ... in the generated lift/lower code.
+    /// </summary>
+    private static string TupleToCS(WitTupleType tuple)
+    {
+        var elems = tuple.ElementTypes;
+        if (elems.Length == 0) return "global::System.ValueTuple";
+        if (elems.Length == 1) return $"global::System.ValueTuple<{WitTypeToCS(elems[0])}>";
+        var parts = new List<string>(elems.Length);
+        foreach (var e in elems) parts.Add(WitTypeToCS(e));
+        return "(" + string.Join(", ", parts) + ")";
     }
 }

@@ -654,7 +654,7 @@ interface types {
         // Instance methods
         Assert.Contains("public unsafe void Write(", code);
         Assert.Contains("[method]blob.write", code);
-        Assert.Contains("public unsafe global::System.Collections.Generic.List<byte> Read(", code);
+        Assert.Contains("public unsafe byte[] Read(", code);
         Assert.Contains("[method]blob.read", code);
 
         // Static method
@@ -1245,6 +1245,288 @@ world guest {
         Assert.Contains("UnmanagedCallersOnly", generatedCode);
         Assert.Contains("setup", generatedCode);
         Assert.Contains("run-system", generatedCode);
+    }
+
+    [Fact]
+    public void GeneratesTupleParamsAndResults()
+    {
+        var compilation = CSharpCompilation.Create("TestAssembly",
+            new[] { CSharpSyntaxTree.ParseText("") },
+            new[] { MetadataReference.CreateFromFile(typeof(object).Assembly.Location) },
+            new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
+
+        var generator = new ComponentGuestGenerator();
+        var witContent = @"
+package my:pkg@1.0.0;
+
+world tuptest {
+    import make-pair: func(a: s32, b: string) -> tuple<s32, string>;
+    export use-pair: func(p: tuple<u32, f64>) -> u32;
+}
+";
+        var additionalText = new InMemoryAdditionalText("test/tup.wit", witContent);
+        var driver = CSharpGeneratorDriver.Create(generator)
+            .AddAdditionalTexts(ImmutableArray.Create<AdditionalText>(additionalText));
+        driver = (CSharpGeneratorDriver)driver.RunGeneratorsAndUpdateCompilation(
+            compilation, out _, out _);
+        var result = driver.GetRunResult();
+        Assert.NotEmpty(result.GeneratedTrees);
+
+        var generatedCode = result.GeneratedTrees
+            .Select(t => t.GetText().ToString())
+            .Aggregate("", (a, b) => a + "\n" + b);
+
+        // Tuple -> C# ValueTuple in the high-level signatures.
+        Assert.Contains("(int, string) MakePair(", generatedCode);
+        Assert.Contains("UsePair((uint, double) p)", generatedCode);
+        // Lift (import result) and lower-construct (export param) use ValueTuple .ItemN access.
+        Assert.Contains("(int, string) retTup = default;", generatedCode);
+        Assert.Contains("retTup.Item1 =", generatedCode);
+        Assert.Contains("retTup.Item2 =", generatedCode);
+        Assert.Contains("(uint, double) pTup = default;", generatedCode);
+        Assert.Contains("pTup.Item1 = (uint)p_0;", generatedCode);
+
+        // Generated trees must be syntactically valid (catches malformed ValueTuple construction).
+        foreach (var tree in result.GeneratedTrees)
+        {
+            var errors = tree.GetDiagnostics()
+                .Where(d => d.Severity == DiagnosticSeverity.Error)
+                .ToList();
+            Assert.Empty(errors);
+        }
+    }
+
+    [Fact]
+    public void LiftsVariantAndFlagsAndNestedListResults()
+    {
+        var compilation = CSharpCompilation.Create("TestAssembly",
+            new[] { CSharpSyntaxTree.ParseText("") },
+            new[] { MetadataReference.CreateFromFile(typeof(object).Assembly.Location) },
+            new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
+        var generator = new ComponentGuestGenerator();
+        var witContent = @"
+package my:pkg@1.0.0;
+
+interface t {
+    variant shape { circle(f64), rect(u32), empty }
+    flags perms { read, write }
+    get-shape: func() -> shape;
+    get-combo: func() -> tuple<perms, list<u32>>;
+}
+
+world w {
+    import t;
+}
+";
+        var additionalText = new InMemoryAdditionalText("test/var.wit", witContent);
+        var driver = CSharpGeneratorDriver.Create(generator)
+            .AddAdditionalTexts(ImmutableArray.Create<AdditionalText>(additionalText));
+        driver = (CSharpGeneratorDriver)driver.RunGeneratorsAndUpdateCompilation(compilation, out _, out _);
+        var result = driver.GetRunResult();
+        var generatedCode = result.GeneratedTrees.Select(t => t.GetText().ToString()).Aggregate("", (a, b) => a + "\n" + b);
+
+        // variant: 1-byte discriminant (3 cases -> u8); payload at aligned offset 8 (f64 case forces align 8).
+        Assert.Contains("retVar.Discriminant = (Shape.Case)*(byte*)((byte*)retArea);", generatedCode);
+        Assert.Contains("retVar.CirclePayload = *(double*)((byte*)retArea + 8);", generatedCode);
+        // flags element of a tuple result read + cast; nested list read at its aligned offset + freed.
+        Assert.Contains("(Perms)*(int*)((byte*)retArea)", generatedCode);
+        Assert.Contains("new Span<uint>(retItem2ListPtr, retItem2ListCount).ToArray()", generatedCode);
+        Assert.Contains("InteropHelpers.Free(retItem2ListPtr", generatedCode);
+
+        foreach (var tree in result.GeneratedTrees)
+            Assert.Empty(tree.GetDiagnostics().Where(d => d.Severity == DiagnosticSeverity.Error));
+    }
+
+    [Fact]
+    public void LiftsIndirectResultsWithMemoryLayout()
+    {
+        // Indirect (retptr) results are stored in canonical MEMORY layout (per-field alignment),
+        // not a packed slot model. f64 in tuple<u8,f64> must land at byte 8, not byte 4.
+        var compilation = CSharpCompilation.Create("TestAssembly",
+            new[] { CSharpSyntaxTree.ParseText("") },
+            new[] { MetadataReference.CreateFromFile(typeof(object).Assembly.Location) },
+            new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
+        var generator = new ComponentGuestGenerator();
+        var witContent = @"
+package my:pkg@1.0.0;
+
+world w {
+    import gap: func() -> tuple<u8, f64>;
+    import nested: func() -> tuple<u8, tuple<s32, f64>>;
+    import maybe: func() -> option<f64>;
+}
+";
+        var additionalText = new InMemoryAdditionalText("test/b2.wit", witContent);
+        var driver = CSharpGeneratorDriver.Create(generator)
+            .AddAdditionalTexts(ImmutableArray.Create<AdditionalText>(additionalText));
+        driver = (CSharpGeneratorDriver)driver.RunGeneratorsAndUpdateCompilation(compilation, out _, out _);
+        var result = driver.GetRunResult();
+        var generatedCode = result.GeneratedTrees.Select(t => t.GetText().ToString()).Aggregate("", (a, b) => a + "\n" + b);
+
+        // tuple<u8,f64>: f64 aligned to 8 -> byte offset 8 (NOT packed offset 4). retArea = 16 bytes = int[4].
+        Assert.Contains("retTup.Item2 = *(double*)((byte*)retArea + 8);", generatedCode);
+        // nested tuple<u8,tuple<s32,f64>>: inner s32 @ 8, inner f64 @ 16. retArea = 24 bytes = int[6].
+        Assert.Contains("*(int*)((byte*)retArea + 8)", generatedCode);
+        Assert.Contains("*(double*)((byte*)retArea + 16)", generatedCode);
+        Assert.Contains("stackalloc int[6]", generatedCode);
+        // option<f64>: discriminant byte @ 0, payload f64 @ 8.
+        Assert.Contains("double? retOpt;", generatedCode);
+        Assert.Contains("if (*(byte*)((byte*)retArea) != 0)", generatedCode);
+
+        foreach (var tree in result.GeneratedTrees)
+            Assert.Empty(tree.GetDiagnostics().Where(d => d.Severity == DiagnosticSeverity.Error));
+    }
+
+    [Fact]
+    public void ResolvesTypeAliasAtUseSite()
+    {
+        // WIT 'type x = y' has no C# representation (C# can't alias arbitrary types inside a class).
+        // It is resolved to the underlying type at every use-site; verify that resolution works and
+        // the alias name never leaks as an undefined C# type.
+        var compilation = CSharpCompilation.Create("TestAssembly",
+            new[] { CSharpSyntaxTree.ParseText("") },
+            new[] { MetadataReference.CreateFromFile(typeof(object).Assembly.Location) },
+            new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
+        var generator = new ComponentGuestGenerator();
+        var witContent = @"
+package my:pkg@1.0.0;
+
+interface t {
+    type my-len = u32;
+    type name = string;
+    measure: func(input: name) -> my-len;
+    resize: func(len: my-len);
+}
+
+world w { import t; }
+";
+        var additionalText = new InMemoryAdditionalText("test/alias.wit", witContent);
+        var driver = CSharpGeneratorDriver.Create(generator)
+            .AddAdditionalTexts(ImmutableArray.Create<AdditionalText>(additionalText));
+        driver = (CSharpGeneratorDriver)driver.RunGeneratorsAndUpdateCompilation(compilation, out _, out _);
+        var result = driver.GetRunResult();
+        var generatedCode = result.GeneratedTrees.Select(t => t.GetText().ToString()).Aggregate("", (a, b) => a + "\n" + b);
+
+        // Aliases resolve to underlying C# types in the high-level API (my-len -> uint, name -> string),
+        // NOT the alias name (which has no C# declaration and would not compile).
+        Assert.Contains("uint Measure(string input)", generatedCode);
+        Assert.Contains("void Resize(uint len)", generatedCode);
+        Assert.DoesNotContain("MyLen", generatedCode);
+        Assert.DoesNotContain("Name input", generatedCode);
+
+        foreach (var tree in result.GeneratedTrees)
+            Assert.Empty(tree.GetDiagnostics().Where(d => d.Severity == DiagnosticSeverity.Error));
+    }
+
+    [Fact]
+    public void LowersAggregateExportResults()
+    {
+        // Exported functions returning aggregates store the result into a guest-allocated
+        // return area in canonical memory layout and free it (plus nested heap) in cabi_post_return.
+        var compilation = CSharpCompilation.Create("TestAssembly",
+            new[] { CSharpSyntaxTree.ParseText("") },
+            new[] { MetadataReference.CreateFromFile(typeof(object).Assembly.Location) },
+            new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
+        var generator = new ComponentGuestGenerator();
+        var witContent = @"
+package my:pkg@1.0.0;
+
+interface t {
+    record point { x: s32, y: f64 }
+    record named { id: u32, name: string }
+    variant ev { tick(u64), msg(string), stop }
+    get-point: func() -> point;
+    get-named: func() -> named;
+    get-opt: func() -> option<string>;
+    get-ev: func() -> ev;
+}
+
+world w { export t; }
+";
+        var additionalText = new InMemoryAdditionalText("test/exp.wit", witContent);
+        var driver = CSharpGeneratorDriver.Create(generator)
+            .AddAdditionalTexts(ImmutableArray.Create<AdditionalText>(additionalText));
+        driver = (CSharpGeneratorDriver)driver.RunGeneratorsAndUpdateCompilation(compilation, out _, out _);
+        var result = driver.GetRunResult();
+        var generatedCode = result.GeneratedTrees.Select(t => t.GetText().ToString()).Aggregate("", (a, b) => a + "\n" + b);
+
+        // record{s32,f64}: Alloc(16,8); f64 stored at aligned offset 8; post-return frees the area.
+        Assert.Contains("var retArea = WitBindgen.Runtime.InteropHelpers.Alloc(16, 8);", generatedCode);
+        Assert.Contains("*(double*)((byte*)retArea + 8) = result.Y;", generatedCode);
+        Assert.Contains("WitBindgen.Runtime.InteropHelpers.Free((void*)retPtr, 16, 8);", generatedCode);
+        // record{u32,string}: string stored at offset 4; post-return frees the string then the area.
+        Assert.Contains("*(int*)((byte*)retArea + 4) = (int)sMem", generatedCode);
+        Assert.Contains("WitBindgen.Runtime.InteropHelpers.Free((void*)*(int*)((byte*)retPtr + 4)", generatedCode);
+        // option<string>: null check + value cast.
+        Assert.Contains("if (result != null)", generatedCode);
+        Assert.Contains("((string)result)", generatedCode);
+        // variant: 1-byte discriminant store (3 cases -> u8) + payload switch; post-return frees only the heap-bearing case.
+        Assert.Contains("*(byte*)((byte*)retArea) = (byte)result.Discriminant;", generatedCode);
+        Assert.Contains("case Ev.Case.Msg:", generatedCode);
+        // Entry-point identifiers must be legal C# (no '.'/'#').
+        Assert.Contains("__wit_export_my_pkg_t_1_0_0_get_point", generatedCode);
+
+        foreach (var tree in result.GeneratedTrees)
+            Assert.Empty(tree.GetDiagnostics().Where(d => d.Severity == DiagnosticSeverity.Error));
+    }
+
+    [Fact]
+    public void GeneratesTupleEdgeCases()
+    {
+        var compilation = CSharpCompilation.Create("TestAssembly",
+            new[] { CSharpSyntaxTree.ParseText("") },
+            new[] { MetadataReference.CreateFromFile(typeof(object).Assembly.Location) },
+            new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
+
+        var generator = new ComponentGuestGenerator();
+        var witContent = @"
+package my:pkg@1.0.0;
+
+world w {
+    import get-list: func() -> list<tuple<s32, string>>;
+    import one: func() -> tuple<s32>;
+    import nested: func() -> tuple<u8, tuple<s32, f64>>;
+    import get-pair: func() -> tuple<s32, f64>;
+    import take-list: func(items: list<tuple<u32, u32>>);
+    import take-nested: func(t: tuple<u8, tuple<s32, f64>>);
+}
+";
+        var additionalText = new InMemoryAdditionalText("test/te.wit", witContent);
+        var driver = CSharpGeneratorDriver.Create(generator)
+            .AddAdditionalTexts(ImmutableArray.Create<AdditionalText>(additionalText));
+        driver = (CSharpGeneratorDriver)driver.RunGeneratorsAndUpdateCompilation(
+            compilation, out _, out _);
+        var result = driver.GetRunResult();
+        Assert.NotEmpty(result.GeneratedTrees);
+
+        var generatedCode = result.GeneratedTrees
+            .Select(t => t.GetText().ToString())
+            .Aggregate("", (a, b) => a + "\n" + b);
+
+        // list<tuple<s32,string>> import result.
+        Assert.Contains("(int, string)[] GetList()", generatedCode);
+        // arity-1 tuple<s32> returned directly (single core slot): must lift + return, not drop.
+        Assert.Contains("return new global::System.ValueTuple<int>((int)rawResult);", generatedCode);
+        // nested tuple<u8, tuple<s32,f64>> built recursively.
+        Assert.Contains("(byte, (int, double)) Nested()", generatedCode);
+        Assert.Contains("(int, double) retItem2Tup = default;", generatedCode);
+        // nested tuple param lowered with .Item2.Item1 / .Item2.Item2 access.
+        Assert.Contains("t.Item2.Item1", generatedCode);
+        Assert.Contains("t.Item2.Item2", generatedCode);
+        // list<tuple<u32,u32>> param: per-element store of both items.
+        Assert.Contains("items[itemsIdx].Item1", generatedCode);
+        Assert.Contains("items[itemsIdx].Item2", generatedCode);
+        // Return area sized by canonical MemorySize (memory layout, with alignment):
+        //   tuple<s32,f64> = 16 bytes = int[4]; tuple<u8,tuple<s32,f64>> = 24 bytes = int[6].
+        // Before the fix it was sized by FlatCount (f64 counted as 1 slot) -> int[2]/int[3], a stack over-read.
+        Assert.Contains("stackalloc int[4]", generatedCode);
+        Assert.Contains("stackalloc int[6]", generatedCode);
+
+        foreach (var tree in result.GeneratedTrees)
+        {
+            var errors = tree.GetDiagnostics().Where(d => d.Severity == DiagnosticSeverity.Error).ToList();
+            Assert.Empty(errors);
+        }
     }
 
     #endregion

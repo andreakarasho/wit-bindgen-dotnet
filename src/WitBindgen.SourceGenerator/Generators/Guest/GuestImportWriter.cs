@@ -103,11 +103,11 @@ public static class GuestImportWriter
         List<(string type, string name)> flatParams,
         bool useRetPtr)
     {
-        // Build high-level parameter list
+        // Build high-level parameter list (use ReadOnlySpan<T> for blittable list params)
         var highLevelParams = new List<string>();
         foreach (var param in func.Parameters)
         {
-            highLevelParams.Add($"{CanonicalAbi.WitTypeToCS(param.Type)} {param.CSharpVariableName}");
+            highLevelParams.Add($"{CanonicalAbi.WitTypeToCSParam(param.Type)} {param.CSharpVariableName}");
         }
 
         // Determine return type
@@ -141,7 +141,7 @@ public static class GuestImportWriter
             {
                 var retFlatCount = 0;
                 foreach (var r in func.Results)
-                    retFlatCount += CanonicalAbi.FlatCount(r);
+                    retFlatCount += (CanonicalAbi.MemorySize(r) + 3) / 4;
 
                 sb.AppendLine($"int* retArea = stackalloc int[{Math.Max(retFlatCount, 2)}];");
                 callArgs.Add("(nint)retArea");
@@ -178,7 +178,11 @@ public static class GuestImportWriter
                 }
                 else
                 {
-                    sb.AppendLine($"WasmImports.{csharpFuncName}({callArgsStr});");
+                    // Single-flat non-primitive result (e.g. arity-1 tuple<prim>): capture and lift.
+                    sb.AppendLine($"var rawResult = WasmImports.{csharpFuncName}({callArgsStr});");
+                    WriteParamCleanup(sb, func);
+                    WriteLiftResult(sb, resultType, "rawResult");
+                    return;
                 }
             }
             else
@@ -205,30 +209,49 @@ public static class GuestImportWriter
                 {
                     var elemSize = CanonicalAbi.MemorySize(resultListType.ElementType);
                     var elemAlign = CanonicalAbi.MemoryAlign(resultListType.ElementType);
+                    var resolvedElemType = CanonicalAbi.ResolveType(resultListType.ElementType);
 
                     sb.AppendLine("var resultListPtr = (byte*)retArea[0];");
                     sb.AppendLine("var resultListCount = retArea[1];");
-                    sb.AppendLine($"var resultList = new {CanonicalAbi.WitTypeToCS(resultType)}(resultListCount);");
-                    sb.AppendLine("for (int resultIdx = 0; resultIdx < resultListCount; resultIdx++)");
-                    using (sb.Block())
-                    {
-                        sb.AppendLine($"var resultElemBase = resultListPtr + resultIdx * {elemSize};");
-                        WriteLiftListElement(sb, resultListType.ElementType, "resultElemBase", "resultList");
-                    }
 
-                    // Free host-allocated element buffers (e.g. string data)
-                    if (resultListType.ElementType.Kind == WitTypeKind.String || resultListType.ElementType.Kind == WitTypeKind.List)
+                    if (CanonicalAbi.IsBlittable(resolvedElemType) && !CanonicalAbi.IsBlittablePrimitive(resolvedElemType))
                     {
-                        sb.AppendLine("for (int resultFreeIdx = 0; resultFreeIdx < resultListCount; resultFreeIdx++)");
+                        // Blittable record: zero-copy OwnedSpan — no ToArray, free deferred to Dispose
+                        var elemCsType = CanonicalAbi.WitListElementTypeToCS(resultListType);
+                        sb.AppendLine($"return new WitBindgen.Runtime.OwnedSpan<{elemCsType}>(resultListPtr, resultListCount, resultListCount * {elemSize}, {elemAlign});");
+                    }
+                    else if (CanonicalAbi.IsBlittablePrimitive(resolvedElemType))
+                    {
+                        // Blittable primitive: bulk copy
+                        var elemCsType = CanonicalAbi.WitListElementTypeToCS(resultListType);
+                        sb.AppendLine($"var resultList = new Span<{elemCsType}>(resultListPtr, resultListCount).ToArray();");
+                        sb.AppendLine($"WitBindgen.Runtime.InteropHelpers.Free(resultListPtr, resultListCount * {elemSize}, {elemAlign});");
+                        sb.AppendLine("return resultList;");
+                    }
+                    else
+                    {
+                        sb.AppendLine($"var resultList = new {CanonicalAbi.WitListElementTypeToCS(resultListType)}[resultListCount];");
+                        sb.AppendLine("for (int resultIdx = 0; resultIdx < resultListCount; resultIdx++)");
                         using (sb.Block())
                         {
-                            sb.AppendLine($"var resultFreeBase = resultListPtr + resultFreeIdx * {elemSize};");
-                            WriteListElementCleanup(sb, resultListType.ElementType, "resultFreeBase");
+                            sb.AppendLine($"var resultElemBase = resultListPtr + resultIdx * {elemSize};");
+                            WriteLiftListElement(sb, resultListType.ElementType, "resultElemBase", "resultList", "resultIdx");
                         }
-                    }
 
-                    sb.AppendLine($"WitBindgen.Runtime.InteropHelpers.Free(resultListPtr, resultListCount * {elemSize}, {elemAlign});");
-                    sb.AppendLine("return resultList;");
+                        // Free host-allocated element buffers (e.g. string data)
+                        if (resultListType.ElementType.Kind == WitTypeKind.String || resultListType.ElementType.Kind == WitTypeKind.List)
+                        {
+                            sb.AppendLine("for (int resultFreeIdx = 0; resultFreeIdx < resultListCount; resultFreeIdx++)");
+                            using (sb.Block())
+                            {
+                                sb.AppendLine($"var resultFreeBase = resultListPtr + resultFreeIdx * {elemSize};");
+                                WriteListElementCleanup(sb, resultListType.ElementType, "resultFreeBase");
+                            }
+                        }
+
+                        sb.AppendLine($"WitBindgen.Runtime.InteropHelpers.Free(resultListPtr, resultListCount * {elemSize}, {elemAlign});");
+                        sb.AppendLine("return resultList;");
+                    }
                 }
                 else if (IsSimplePrimitive(resultType))
                 {
@@ -240,8 +263,9 @@ public static class GuestImportWriter
                 }
                 else
                 {
-                    int flatIdx = 0;
-                    var lifted = WriteLiftFromFlatRetArea(sb, resultType, "retArea", ref flatIdx, "ret");
+                    // Indirect results are stored at retArea in canonical memory layout
+                    // (per-field alignment), so read them with WriteMemoryLoad, not a packed slot model.
+                    var lifted = WriteMemoryLoad(sb, resultType, "(byte*)retArea", 0, "ret");
                     sb.AppendLine($"return {lifted};");
                 }
             }
@@ -309,7 +333,7 @@ public static class GuestImportWriter
                     var elemSize = CanonicalAbi.MemorySize(listType.ElementType);
                     var elemAlign = CanonicalAbi.MemoryAlign(listType.ElementType);
 
-                    sb.AppendLine($"var {countVar} = {varName}.Count;");
+                    sb.AppendLine($"var {countVar} = {varName}.Length;");
                     sb.AppendLine($"var {varName}ListBufSize = {countVar} * {elemSize};");
 
                     if (listType.ElementType.Kind == WitTypeKind.String)
@@ -361,6 +385,13 @@ public static class GuestImportWriter
                             sb.AppendLine($"{varName}StringOffset += elemByteLen;");
                         }
                     }
+                    else if (CanonicalAbi.IsBlittable(CanonicalAbi.ResolveType(listType.ElementType))
+                        && !CanonicalAbi.IsBlittablePrimitive(CanonicalAbi.ResolveType(listType.ElementType)))
+                    {
+                        // Blittable record: zero-copy via MemoryMarshal.Cast
+                        var elemCsType = CanonicalAbi.WitListElementTypeToCS(listType);
+                        sb.AppendLine($"byte* {listPtrVar} = (byte*)global::System.Runtime.CompilerServices.Unsafe.AsPointer(ref global::System.Runtime.InteropServices.MemoryMarshal.GetReference(global::System.Runtime.InteropServices.MemoryMarshal.AsBytes({varName})));");
+                    }
                     else
                     {
                         // stackalloc/ArrayPool for list metadata buffer (primitive elements)
@@ -396,6 +427,16 @@ public static class GuestImportWriter
                     foreach (var field in recordType.Fields)
                     {
                         WriteLowerFlat(sb, field.Type, $"{varName}.{field.CSharpName}", callArgs);
+                    }
+                }
+                break;
+
+            case WitTypeKind.Tuple:
+                if (type is WitTupleType tupleTypeLower)
+                {
+                    for (int ti = 0; ti < tupleTypeLower.ElementTypes.Length; ti++)
+                    {
+                        WriteLowerFlat(sb, tupleTypeLower.ElementTypes[ti], $"{varName}.Item{ti + 1}", callArgs);
                     }
                 }
                 break;
@@ -519,6 +560,16 @@ public static class GuestImportWriter
                 }
                 break;
 
+            case WitTypeKind.Tuple:
+                if (type is WitTupleType tupleTypeFlat)
+                {
+                    for (int ti = 0; ti < tupleTypeFlat.ElementTypes.Length; ti++)
+                    {
+                        WriteLowerFlat(sb, tupleTypeFlat.ElementTypes[ti], $"{expr}.Item{ti + 1}", callArgs);
+                    }
+                }
+                break;
+
             case WitTypeKind.Variant:
                 if (type is WitVariantType variantType)
                 {
@@ -593,9 +644,14 @@ public static class GuestImportWriter
             case WitTypeKind.U32:
             case WitTypeKind.S32:
             case WitTypeKind.Char:
-            case WitTypeKind.Enum:
                 sb.AppendLine($"*(int*){baseVar} = (int){elemExpr};");
                 break;
+            case WitTypeKind.Enum:
+            {
+                var enumKw = CanonicalAbi.IntStoreKeyword(CanonicalAbi.EnumSizeOf(elemType));
+                sb.AppendLine($"*({enumKw}*){baseVar} = ({enumKw}){elemExpr};");
+                break;
+            }
             case WitTypeKind.U64:
             case WitTypeKind.S64:
                 sb.AppendLine($"*(long*){baseVar} = (long){elemExpr};");
@@ -630,18 +686,25 @@ public static class GuestImportWriter
                     }
                 }
                 break;
+            case WitTypeKind.Tuple:
+                if (elemType is WitTupleType tupElemType)
+                {
+                    int offset = 0;
+                    for (int ti = 0; ti < tupElemType.ElementTypes.Length; ti++)
+                    {
+                        var et = tupElemType.ElementTypes[ti];
+                        offset = CanonicalAbi.AlignTo(offset, CanonicalAbi.MemoryAlign(et));
+                        WriteMemoryStore(sb, et, $"{elemExpr}.Item{ti + 1}", baseVar, offset);
+                        offset += CanonicalAbi.MemorySize(et);
+                    }
+                }
+                break;
             case WitTypeKind.Variant:
                 if (elemType is WitVariantType varType)
                 {
-                    sb.AppendLine($"*(int*){baseVar} = (int){elemExpr}.Discriminant;");
-                    // Compute payload offset (aligned after 4-byte discriminant)
-                    int maxPayloadAlign = 4;
-                    foreach (var c in varType.Values)
-                    {
-                        if (c.Type is not null)
-                            maxPayloadAlign = Math.Max(maxPayloadAlign, CanonicalAbi.MemoryAlign(c.Type));
-                    }
-                    var payloadOffset = CanonicalAbi.AlignTo(4, maxPayloadAlign);
+                    var discKw = CanonicalAbi.IntStoreKeyword(CanonicalAbi.VariantDiscSize(varType));
+                    sb.AppendLine($"*({discKw}*){baseVar} = ({discKw}){elemExpr}.Discriminant;");
+                    var payloadOffset = CanonicalAbi.VariantPayloadOffset(varType);
                     sb.AppendLine($"switch ({elemExpr}.Discriminant)");
                     using (sb.Block())
                     {
@@ -692,9 +755,14 @@ public static class GuestImportWriter
             case WitTypeKind.U32:
             case WitTypeKind.S32:
             case WitTypeKind.Char:
-            case WitTypeKind.Enum:
                 sb.AppendLine($"*(int*)({offsetExpr}) = (int){expr};");
                 break;
+            case WitTypeKind.Enum:
+            {
+                var enumKw = CanonicalAbi.IntStoreKeyword(CanonicalAbi.EnumSizeOf(type));
+                sb.AppendLine($"*({enumKw}*)({offsetExpr}) = ({enumKw}){expr};");
+                break;
+            }
             case WitTypeKind.U64:
             case WitTypeKind.S64:
                 sb.AppendLine($"*(long*)({offsetExpr}) = (long){expr};");
@@ -730,6 +798,19 @@ public static class GuestImportWriter
                     }
                 }
                 break;
+            case WitTypeKind.Tuple:
+                if (type is WitTupleType tupStoreType)
+                {
+                    int fieldOffset = offset;
+                    for (int ti = 0; ti < tupStoreType.ElementTypes.Length; ti++)
+                    {
+                        var et = tupStoreType.ElementTypes[ti];
+                        fieldOffset = CanonicalAbi.AlignTo(fieldOffset, CanonicalAbi.MemoryAlign(et));
+                        WriteMemoryStore(sb, et, $"{expr}.Item{ti + 1}", baseVar, fieldOffset);
+                        fieldOffset += CanonicalAbi.MemorySize(et);
+                    }
+                }
+                break;
             default:
                 sb.AppendLine($"*(int*)({offsetExpr}) = (int){expr};");
                 break;
@@ -762,7 +843,10 @@ public static class GuestImportWriter
             case WitTypeKind.Char:
                 return $"*(uint*)({offsetExpr})";
             case WitTypeKind.Enum:
-                return $"({CanonicalAbi.WitTypeToCS(type)})*(int*)({offsetExpr})";
+            {
+                var enumKw = CanonicalAbi.IntStoreKeyword(CanonicalAbi.EnumSizeOf(type));
+                return $"({CanonicalAbi.WitTypeToCS(type)})*({enumKw}*)({offsetExpr})";
+            }
             case WitTypeKind.U64:
                 return $"*(ulong*)({offsetExpr})";
             case WitTypeKind.S64:
@@ -797,6 +881,105 @@ public static class GuestImportWriter
                         fieldOffset += CanonicalAbi.MemorySize(field.Type);
                     }
                     return recVar;
+                }
+                return "default";
+            case WitTypeKind.Tuple:
+                if (type is WitTupleType tupLoadType)
+                {
+                    var tupVar = $"{varPrefix}Tup";
+                    sb.AppendLine($"{CanonicalAbi.WitTypeToCS(type)} {tupVar} = default;");
+                    int fieldOffset = offset;
+                    for (int ti = 0; ti < tupLoadType.ElementTypes.Length; ti++)
+                    {
+                        var et = tupLoadType.ElementTypes[ti];
+                        var fAlign = CanonicalAbi.MemoryAlign(et);
+                        fieldOffset = CanonicalAbi.AlignTo(fieldOffset, fAlign);
+                        var fieldExpr = WriteMemoryLoad(sb, et, baseVar, fieldOffset, $"{varPrefix}Item{ti + 1}");
+                        sb.AppendLine($"{tupVar}.Item{ti + 1} = {fieldExpr};");
+                        fieldOffset += CanonicalAbi.MemorySize(et);
+                    }
+                    return tupVar;
+                }
+                return "default";
+            case WitTypeKind.Flags:
+                return $"({CanonicalAbi.WitTypeToCS(type)})*(int*)({offsetExpr})";
+            case WitTypeKind.Option:
+                if (type is WitOptionType optLoadType)
+                {
+                    var inner = CanonicalAbi.ResolveType(optLoadType.ElementType);
+                    var innerCs = CanonicalAbi.WitTypeToCS(optLoadType.ElementType);
+                    var payloadOffset = offset + CanonicalAbi.AlignTo(1, CanonicalAbi.MemoryAlign(inner));
+                    var optVar = $"{varPrefix}Opt";
+                    sb.AppendLine($"{innerCs}? {optVar};");
+                    sb.AppendLine($"if (*(byte*)({offsetExpr}) != 0)");
+                    using (sb.Block())
+                    {
+                        var innerExpr = WriteMemoryLoad(sb, inner, baseVar, payloadOffset, $"{varPrefix}Inner");
+                        sb.AppendLine($"{optVar} = {innerExpr};");
+                    }
+                    sb.AppendLine("else");
+                    using (sb.Block())
+                    {
+                        sb.AppendLine($"{optVar} = null;");
+                    }
+                    return optVar;
+                }
+                return "default";
+            case WitTypeKind.Variant:
+                if (type is WitVariantType varLoadType)
+                {
+                    var csName = CanonicalAbi.WitTypeToCS(type);
+                    var varVar = $"{varPrefix}Var";
+                    sb.AppendLine($"{csName} {varVar} = default;");
+                    var discKw = CanonicalAbi.IntStoreKeyword(CanonicalAbi.VariantDiscSize(varLoadType));
+                    sb.AppendLine($"{varVar}.Discriminant = ({csName}.Case)*({discKw}*)({offsetExpr});");
+                    var payloadOffset = offset + CanonicalAbi.VariantPayloadOffset(varLoadType);
+                    sb.AppendLine($"switch ({varVar}.Discriminant)");
+                    using (sb.Block())
+                    {
+                        foreach (var c in varLoadType.Values)
+                        {
+                            if (c.Type is not null)
+                            {
+                                var caseName = StringUtils.GetName(c.Name);
+                                sb.AppendLine($"case {csName}.Case.{caseName}:");
+                                sb.IncrementIndent();
+                                var payloadExpr = WriteMemoryLoad(sb, c.Type, baseVar, payloadOffset, $"{varPrefix}{caseName}");
+                                sb.AppendLine($"{varVar}.{caseName}Payload = {payloadExpr};");
+                                sb.AppendLine("break;");
+                                sb.DecrementIndent();
+                            }
+                        }
+                    }
+                    return varVar;
+                }
+                return "default";
+            case WitTypeKind.List:
+                if (type is WitListType listLoadType)
+                {
+                    var elemSize = CanonicalAbi.MemorySize(listLoadType.ElementType);
+                    var elemAlign = CanonicalAbi.MemoryAlign(listLoadType.ElementType);
+                    var resolvedElem = CanonicalAbi.ResolveType(listLoadType.ElementType);
+                    var elemCs = CanonicalAbi.WitListElementTypeToCS(listLoadType);
+                    var lvar = $"{varPrefix}List";
+                    sb.AppendLine($"var {lvar}Ptr = (byte*)*(int*)({offsetExpr});");
+                    sb.AppendLine($"var {lvar}Count = *(int*)({offsetExpr} + 4);");
+                    if (CanonicalAbi.IsBlittablePrimitive(resolvedElem))
+                    {
+                        sb.AppendLine($"var {lvar} = new Span<{elemCs}>({lvar}Ptr, {lvar}Count).ToArray();");
+                    }
+                    else
+                    {
+                        sb.AppendLine($"var {lvar} = new {elemCs}[{lvar}Count];");
+                        sb.AppendLine($"for (int {lvar}Idx = 0; {lvar}Idx < {lvar}Count; {lvar}Idx++)");
+                        using (sb.Block())
+                        {
+                            sb.AppendLine($"var {lvar}ElemBase = {lvar}Ptr + {lvar}Idx * {elemSize};");
+                            WriteLiftListElement(sb, listLoadType.ElementType, $"{lvar}ElemBase", lvar, $"{lvar}Idx");
+                        }
+                    }
+                    sb.AppendLine($"WitBindgen.Runtime.InteropHelpers.Free({lvar}Ptr, {lvar}Count * {elemSize}, {elemAlign});");
+                    return lvar;
                 }
                 return "default";
             default:
@@ -842,154 +1025,30 @@ public static class GuestImportWriter
             case WitTypeKind.F64:
                 sb.AppendLine($"return {rawVar};");
                 break;
+            case WitTypeKind.Tuple:
+                // Only reached when the whole tuple flattened to a single core slot,
+                // i.e. exactly one element that is itself a single-slot type. Multi-slot
+                // tuples use the retArea path (WriteMemoryLoad) instead.
+                if (type is WitTupleType singleTup && singleTup.ElementTypes.Length == 1)
+                {
+                    var elem = CanonicalAbi.ResolveType(singleTup.ElementTypes[0]);
+                    var elemCs = CanonicalAbi.WitTypeToCS(singleTup.ElementTypes[0]);
+                    var inner = elem.Kind switch
+                    {
+                        WitTypeKind.Bool => $"{rawVar} != 0",
+                        WitTypeKind.Resource or WitTypeKind.Borrow => $"new {elemCs}({rawVar})",
+                        _ => $"({elemCs}){rawVar}",
+                    };
+                    sb.AppendLine($"return new {CanonicalAbi.WitTypeToCS(type)}({inner});");
+                }
+                else
+                {
+                    sb.AppendLine($"return default;");
+                }
+                break;
             default:
                 sb.AppendLine($"return ({CanonicalAbi.WitTypeToCS(type)}){rawVar};");
                 break;
-        }
-    }
-
-    /// <summary>
-    /// Lifts a complex type from consecutive int slots in a flat retArea.
-    /// Returns the C# expression representing the lifted value.
-    /// </summary>
-    private static string WriteLiftFromFlatRetArea(IndentedStringBuilder sb, WitType type, string retAreaVar, ref int flatIndex, string varPrefix)
-    {
-        type = CanonicalAbi.ResolveType(type);
-        switch (type.Kind)
-        {
-            case WitTypeKind.Bool:
-                return $"({retAreaVar}[{flatIndex++}] != 0)";
-
-            case WitTypeKind.U8:
-                return $"(byte){retAreaVar}[{flatIndex++}]";
-
-            case WitTypeKind.U16:
-                return $"(ushort){retAreaVar}[{flatIndex++}]";
-
-            case WitTypeKind.U32:
-                return $"(uint){retAreaVar}[{flatIndex++}]";
-
-            case WitTypeKind.S8:
-                return $"(sbyte){retAreaVar}[{flatIndex++}]";
-
-            case WitTypeKind.S16:
-                return $"(short){retAreaVar}[{flatIndex++}]";
-
-            case WitTypeKind.S32:
-                return $"{retAreaVar}[{flatIndex++}]";
-
-            case WitTypeKind.U64:
-            {
-                var idx = flatIndex;
-                flatIndex += 2; // i64 takes 2 int slots
-                return $"(ulong)*(long*)&{retAreaVar}[{idx}]";
-            }
-
-            case WitTypeKind.S64:
-            {
-                var idx = flatIndex;
-                flatIndex += 2;
-                return $"*(long*)&{retAreaVar}[{idx}]";
-            }
-
-            case WitTypeKind.F32:
-            {
-                var idx = flatIndex++;
-                return $"*(float*)&{retAreaVar}[{idx}]";
-            }
-
-            case WitTypeKind.F64:
-            {
-                var idx = flatIndex;
-                flatIndex += 2;
-                return $"*(double*)&{retAreaVar}[{idx}]";
-            }
-
-            case WitTypeKind.Char:
-            case WitTypeKind.Enum:
-                return $"({CanonicalAbi.WitTypeToCS(type)}){retAreaVar}[{flatIndex++}]";
-
-            case WitTypeKind.Resource:
-            case WitTypeKind.Borrow:
-                return $"new {CanonicalAbi.WitTypeToCS(type)}({retAreaVar}[{flatIndex++}])";
-
-            case WitTypeKind.String:
-            {
-                var ptrIdx = flatIndex++;
-                var lenIdx = flatIndex++;
-                var strVar = $"{varPrefix}Str";
-                sb.AppendLine($"var {strVar}Ptr = (byte*){retAreaVar}[{ptrIdx}];");
-                sb.AppendLine($"var {strVar}Len = {retAreaVar}[{lenIdx}];");
-                sb.AppendLine($"var {strVar} = global::System.Text.Encoding.UTF8.GetString({strVar}Ptr, {strVar}Len);");
-                sb.AppendLine($"WitBindgen.Runtime.InteropHelpers.Free({strVar}Ptr, {strVar}Len, 1);");
-                return strVar;
-            }
-
-            case WitTypeKind.Record:
-                if (type is WitRecordType recordType)
-                {
-                    var recVar = $"{varPrefix}Rec";
-                    sb.AppendLine($"var {recVar} = new {CanonicalAbi.WitTypeToCS(type)}();");
-                    foreach (var field in recordType.Fields)
-                    {
-                        var fieldExpr = WriteLiftFromFlatRetArea(sb, field.Type, retAreaVar, ref flatIndex, $"{varPrefix}{field.CSharpName}");
-                        sb.AppendLine($"{recVar}.{field.CSharpName} = {fieldExpr};");
-                    }
-                    return recVar;
-                }
-                return "default";
-
-            case WitTypeKind.Option:
-                if (type is WitOptionType optionType)
-                {
-                    var discIdx = flatIndex++;
-                    var optVar = $"{varPrefix}Opt";
-                    var innerType = CanonicalAbi.ResolveType(optionType.ElementType);
-                    var innerCsType = CanonicalAbi.WitTypeToCS(optionType.ElementType);
-
-                    sb.AppendLine($"{innerCsType}? {optVar};");
-                    sb.AppendLine($"if ({retAreaVar}[{discIdx}] != 0)");
-                    using (sb.Block())
-                    {
-                        var innerExpr = WriteLiftFromFlatRetArea(sb, innerType, retAreaVar, ref flatIndex, $"{varPrefix}Inner");
-                        sb.AppendLine($"{optVar} = {innerExpr};");
-                    }
-                    sb.AppendLine("else");
-                    using (sb.Block())
-                    {
-                        // Skip over the inner type's flat slots without reading them
-                        flatIndex += CanonicalAbi.FlatCount(innerType);
-                        sb.AppendLine($"{optVar} = null;");
-                    }
-                    return optVar;
-                }
-                return "default";
-
-            case WitTypeKind.List:
-                if (type is WitListType listType)
-                {
-                    var listPtrIdx = flatIndex++;
-                    var listCountIdx = flatIndex++;
-                    var listVar = $"{varPrefix}List";
-                    var elemSize = CanonicalAbi.MemorySize(listType.ElementType);
-                    var elemAlign = CanonicalAbi.MemoryAlign(listType.ElementType);
-
-                    sb.AppendLine($"var {listVar}Ptr = (byte*){retAreaVar}[{listPtrIdx}];");
-                    sb.AppendLine($"var {listVar}Count = {retAreaVar}[{listCountIdx}];");
-                    sb.AppendLine($"var {listVar} = new {CanonicalAbi.WitTypeToCS(type)}({listVar}Count);");
-                    sb.AppendLine($"for (int {listVar}Idx = 0; {listVar}Idx < {listVar}Count; {listVar}Idx++)");
-                    using (sb.Block())
-                    {
-                        sb.AppendLine($"var {listVar}ElemBase = {listVar}Ptr + {listVar}Idx * {elemSize};");
-                        WriteLiftListElement(sb, listType.ElementType, $"{listVar}ElemBase", listVar);
-                    }
-                    sb.AppendLine($"WitBindgen.Runtime.InteropHelpers.Free({listVar}Ptr, {listVar}Count * {elemSize}, {elemAlign});");
-                    return listVar;
-                }
-                return "default";
-
-            default:
-                return $"({CanonicalAbi.WitTypeToCS(type)}){retAreaVar}[{flatIndex++}]";
         }
     }
 
@@ -1009,6 +1068,11 @@ public static class GuestImportWriter
                 case WitTypeKind.List:
                     if (type is WitListType listType)
                     {
+                        var resolvedElem = CanonicalAbi.ResolveType(listType.ElementType);
+                        // Blittable records use MemoryMarshal.Cast (zero-copy) — no buffer to return
+                        if (CanonicalAbi.IsBlittable(resolvedElem) && !CanonicalAbi.IsBlittablePrimitive(resolvedElem))
+                            break;
+
                         if (listType.ElementType.Kind == WitTypeKind.String)
                         {
                             sb.AppendLine($"if ({varName}StringsRented != null) global::System.Buffers.ArrayPool<byte>.Shared.Return({varName}StringsRented);");
@@ -1021,71 +1085,77 @@ public static class GuestImportWriter
         }
     }
 
-    private static void WriteLiftListElement(IndentedStringBuilder sb, WitType elemType, string baseVar, string listVar)
+    private static void WriteLiftListElement(IndentedStringBuilder sb, WitType elemType, string baseVar, string listVar, string idxVar)
     {
         elemType = CanonicalAbi.ResolveType(elemType);
         switch (elemType.Kind)
         {
             case WitTypeKind.Bool:
-                sb.AppendLine($"{listVar}.Add(*{baseVar} != 0);");
+                sb.AppendLine($"{listVar}[{idxVar}] = *{baseVar} != 0;");
                 break;
             case WitTypeKind.U8:
-                sb.AppendLine($"{listVar}.Add(*{baseVar});");
+                sb.AppendLine($"{listVar}[{idxVar}] = *{baseVar};");
                 break;
             case WitTypeKind.S8:
-                sb.AppendLine($"{listVar}.Add((sbyte)*{baseVar});");
+                sb.AppendLine($"{listVar}[{idxVar}] = (sbyte)*{baseVar};");
                 break;
             case WitTypeKind.U16:
-                sb.AppendLine($"{listVar}.Add(*(ushort*){baseVar});");
+                sb.AppendLine($"{listVar}[{idxVar}] = *(ushort*){baseVar};");
                 break;
             case WitTypeKind.S16:
-                sb.AppendLine($"{listVar}.Add(*(short*){baseVar});");
+                sb.AppendLine($"{listVar}[{idxVar}] = *(short*){baseVar};");
                 break;
             case WitTypeKind.U32:
             case WitTypeKind.Char:
-                sb.AppendLine($"{listVar}.Add(*(uint*){baseVar});");
+                sb.AppendLine($"{listVar}[{idxVar}] = *(uint*){baseVar};");
                 break;
             case WitTypeKind.S32:
-                sb.AppendLine($"{listVar}.Add(*(int*){baseVar});");
+                sb.AppendLine($"{listVar}[{idxVar}] = *(int*){baseVar};");
                 break;
             case WitTypeKind.U64:
-                sb.AppendLine($"{listVar}.Add(*(ulong*){baseVar});");
+                sb.AppendLine($"{listVar}[{idxVar}] = *(ulong*){baseVar};");
                 break;
             case WitTypeKind.S64:
-                sb.AppendLine($"{listVar}.Add(*(long*){baseVar});");
+                sb.AppendLine($"{listVar}[{idxVar}] = *(long*){baseVar};");
                 break;
             case WitTypeKind.F32:
-                sb.AppendLine($"{listVar}.Add(*(float*){baseVar});");
+                sb.AppendLine($"{listVar}[{idxVar}] = *(float*){baseVar};");
                 break;
             case WitTypeKind.F64:
-                sb.AppendLine($"{listVar}.Add(*(double*){baseVar});");
+                sb.AppendLine($"{listVar}[{idxVar}] = *(double*){baseVar};");
                 break;
             case WitTypeKind.String:
                 sb.AppendLine($"var elemStrPtr = (byte*)*(int*){baseVar};");
                 sb.AppendLine($"var elemStrLen = *(int*)({baseVar} + 4);");
-                sb.AppendLine($"{listVar}.Add(global::System.Text.Encoding.UTF8.GetString(elemStrPtr, elemStrLen));");
+                sb.AppendLine($"{listVar}[{idxVar}] = global::System.Text.Encoding.UTF8.GetString(elemStrPtr, elemStrLen);");
                 break;
             case WitTypeKind.Enum:
-                sb.AppendLine($"{listVar}.Add(({CanonicalAbi.WitTypeToCS(elemType)})*(int*){baseVar});");
+                sb.AppendLine($"{listVar}[{idxVar}] = ({CanonicalAbi.WitTypeToCS(elemType)})*(int*){baseVar};");
                 break;
             case WitTypeKind.Resource:
             case WitTypeKind.Borrow:
-                sb.AppendLine($"{listVar}.Add(new {CanonicalAbi.WitTypeToCS(elemType)}(*(int*){baseVar}));");
+                sb.AppendLine($"{listVar}[{idxVar}] = new {CanonicalAbi.WitTypeToCS(elemType)}(*(int*){baseVar});");
                 break;
             case WitTypeKind.Record:
                 if (elemType is WitRecordType liftRecType)
                 {
                     var liftedExpr = WriteMemoryLoad(sb, elemType, baseVar, 0, "elem");
-                    sb.AppendLine($"{listVar}.Add({liftedExpr});");
+                    sb.AppendLine($"{listVar}[{idxVar}] = {liftedExpr};");
                 }
                 else
                 {
-                    sb.AppendLine($"{listVar}.Add(default);");
+                    sb.AppendLine($"{listVar}[{idxVar}] = default;");
+                }
+                break;
+            case WitTypeKind.Tuple:
+                {
+                    var liftedTupleExpr = WriteMemoryLoad(sb, elemType, baseVar, 0, "elem");
+                    sb.AppendLine($"{listVar}[{idxVar}] = {liftedTupleExpr};");
                 }
                 break;
             default:
                 sb.AppendLine($"// TODO: lift list element of type {elemType.Kind}");
-                sb.AppendLine($"{listVar}.Add(default);");
+                sb.AppendLine($"{listVar}[{idxVar}] = default;");
                 break;
         }
     }
@@ -1191,7 +1261,7 @@ public static class GuestImportWriter
             var highLevelParams = new List<string>();
             foreach (var param in ctor.Parameters)
             {
-                highLevelParams.Add($"{CanonicalAbi.WitTypeToCS(param.Type)} {param.CSharpVariableName}");
+                highLevelParams.Add($"{CanonicalAbi.WitTypeToCSParam(param.Type)} {param.CSharpVariableName}");
             }
 
             sb.AppendLine("[global::System.Runtime.CompilerServices.SkipLocalsInit]");
@@ -1208,7 +1278,7 @@ public static class GuestImportWriter
             var highLevelParams = new List<string>();
             foreach (var param in ctor.Parameters)
             {
-                highLevelParams.Add($"{CanonicalAbi.WitTypeToCS(param.Type)} {param.CSharpVariableName}");
+                highLevelParams.Add($"{CanonicalAbi.WitTypeToCSParam(param.Type)} {param.CSharpVariableName}");
             }
 
             sb.AppendLine("[global::System.Runtime.CompilerServices.SkipLocalsInit]");
@@ -1245,11 +1315,11 @@ public static class GuestImportWriter
         var csharpMethodName = StringUtils.GetName(methodName);
         var staticModifier = isStatic ? "static " : "";
 
-        // Build high-level parameter list
+        // Build high-level parameter list (use ReadOnlySpan<T> for blittable list params)
         var highLevelParams = new List<string>();
         foreach (var param in funcType.Parameters)
         {
-            highLevelParams.Add($"{CanonicalAbi.WitTypeToCS(param.Type)} {param.CSharpVariableName}");
+            highLevelParams.Add($"{CanonicalAbi.WitTypeToCSParam(param.Type)} {param.CSharpVariableName}");
         }
 
         // Determine return type
@@ -1290,7 +1360,7 @@ public static class GuestImportWriter
             {
                 var retFlatCount = 0;
                 foreach (var r in funcType.Results)
-                    retFlatCount += CanonicalAbi.FlatCount(r);
+                    retFlatCount += (CanonicalAbi.MemorySize(r) + 3) / 4;
                 sb.AppendLine($"int* retArea = stackalloc int[{Math.Max(retFlatCount, 2)}];");
                 callArgs.Add("(nint)retArea");
             }
@@ -1353,15 +1423,25 @@ public static class GuestImportWriter
                     {
                         var elemSize = CanonicalAbi.MemorySize(resultListType.ElementType);
                         var elemAlign = CanonicalAbi.MemoryAlign(resultListType.ElementType);
+                        var resolvedElemType = CanonicalAbi.ResolveType(resultListType.ElementType);
 
                         sb.AppendLine("var resultListPtr = (byte*)retArea[0];");
                         sb.AppendLine("var resultListCount = retArea[1];");
-                        sb.AppendLine($"var resultList = new {CanonicalAbi.WitTypeToCS(resultWitType)}(resultListCount);");
-                        sb.AppendLine("for (int resultIdx = 0; resultIdx < resultListCount; resultIdx++)");
-                        using (sb.Block())
+
+                        if (CanonicalAbi.IsBlittablePrimitive(resolvedElemType))
                         {
-                            sb.AppendLine($"var resultElemBase = resultListPtr + resultIdx * {elemSize};");
-                            WriteLiftListElement(sb, resultListType.ElementType, "resultElemBase", "resultList");
+                            var elemCsType = CanonicalAbi.WitListElementTypeToCS(resultListType);
+                            sb.AppendLine($"var resultList = new Span<{elemCsType}>(resultListPtr, resultListCount).ToArray();");
+                        }
+                        else
+                        {
+                            sb.AppendLine($"var resultList = new {CanonicalAbi.WitListElementTypeToCS(resultListType)}[resultListCount];");
+                            sb.AppendLine("for (int resultIdx = 0; resultIdx < resultListCount; resultIdx++)");
+                            using (sb.Block())
+                            {
+                                sb.AppendLine($"var resultElemBase = resultListPtr + resultIdx * {elemSize};");
+                                WriteLiftListElement(sb, resultListType.ElementType, "resultElemBase", "resultList", "resultIdx");
+                            }
                         }
 
                         sb.AppendLine($"WitBindgen.Runtime.InteropHelpers.Free(resultListPtr, resultListCount * {elemSize}, {elemAlign});");
@@ -1377,8 +1457,8 @@ public static class GuestImportWriter
                     }
                     else
                     {
-                        int flatIdx = 0;
-                        var lifted = WriteLiftFromFlatRetArea(sb, resultWitType, "retArea", ref flatIdx, "ret");
+                        // Indirect results use canonical memory layout (see WriteMemoryLoad).
+                        var lifted = WriteMemoryLoad(sb, resultWitType, "(byte*)retArea", 0, "ret");
                         sb.AppendLine($"return {lifted};");
                     }
                 }

@@ -422,7 +422,7 @@ public class CanonicalAbiTests
     public void WitTypeToCSList()
     {
         var list = new WitListType(WitType.U8);
-        Assert.Equal("global::System.Collections.Generic.List<byte>", CanonicalAbi.WitTypeToCS(list));
+        Assert.Equal("byte[]", CanonicalAbi.WitTypeToCS(list));
     }
 
     #endregion
@@ -437,6 +437,136 @@ public class CanonicalAbiTests
     public void CoreTypeToCSValues(CoreWasmType coreType, string expected)
     {
         Assert.Equal(expected, CanonicalAbi.CoreTypeToCS(coreType));
+    }
+
+    #endregion
+
+    #region Flatten - join (variants/results with mixed-type cases)
+
+    [Fact]
+    public void FlattenVariantJoinsMixedCasePayloads()
+    {
+        // variant { a(f32), b(s32) } -> [i32 disc, join(f32,i32)=i32]
+        var variant = new WitVariantType(TestPackage, "v",
+            new EquatableArray<WitVariantCase>(new[]
+            {
+                new WitVariantCase("a", WitType.F32),
+                new WitVariantCase("b", WitType.S32),
+            }));
+        Assert.Equal(new[] { CoreWasmType.I32, CoreWasmType.I32 }, CanonicalAbi.Flatten(variant));
+    }
+
+    [Fact]
+    public void FlattenVariantJoinsFloatDoubleToI64()
+    {
+        // variant { a(f32), b(f64) } -> [i32 disc, join(f32,f64)=i64]
+        var variant = new WitVariantType(TestPackage, "v",
+            new EquatableArray<WitVariantCase>(new[]
+            {
+                new WitVariantCase("a", WitType.F32),
+                new WitVariantCase("b", WitType.F64),
+            }));
+        Assert.Equal(new[] { CoreWasmType.I32, CoreWasmType.I64 }, CanonicalAbi.Flatten(variant));
+    }
+
+    [Fact]
+    public void FlattenVariantJoinsPerPositionAcrossDifferentLengths()
+    {
+        // variant { a(s32), b(tuple<s32,f64>) } -> [i32 disc, join(i32,i32)=i32, f64]
+        var tuple = new WitTupleType(new EquatableArray<WitType>(new WitType[] { WitType.S32, WitType.F64 }));
+        var variant = new WitVariantType(TestPackage, "v",
+            new EquatableArray<WitVariantCase>(new[]
+            {
+                new WitVariantCase("a", WitType.S32),
+                new WitVariantCase("b", tuple),
+            }));
+        Assert.Equal(new[] { CoreWasmType.I32, CoreWasmType.I32, CoreWasmType.F64 }, CanonicalAbi.Flatten(variant));
+    }
+
+    [Fact]
+    public void FlattenResultJoinsMixedTypes()
+    {
+        // result<f32, s32> -> [i32 disc, join(f32,i32)=i32]
+        var result = new WitResultType(WitType.F32, WitType.S32);
+        Assert.Equal(new[] { CoreWasmType.I32, CoreWasmType.I32 }, CanonicalAbi.Flatten(result));
+    }
+
+    [Fact]
+    public void FlattenResultJoinsFloatDoubleToI64()
+    {
+        // result<f32, f64> -> [i32 disc, join(f32,f64)=i64]
+        var result = new WitResultType(WitType.F32, WitType.F64);
+        Assert.Equal(new[] { CoreWasmType.I32, CoreWasmType.I64 }, CanonicalAbi.Flatten(result));
+    }
+
+    #endregion
+
+    #region Discriminant memory layout (enum / variant / result)
+
+    [Theory]
+    [InlineData(1, 1)]
+    [InlineData(2, 1)]
+    [InlineData(256, 1)]
+    [InlineData(257, 2)]
+    [InlineData(65536, 2)]
+    [InlineData(65537, 4)]
+    public void DiscriminantSizeByCaseCount(int cases, int expected)
+        => Assert.Equal(expected, CanonicalAbi.DiscriminantSize(cases));
+
+    [Fact]
+    public void EnumMemoryIsOneByteForSmallEnum()
+    {
+        var e = new WitEnumType(TestPackage, "color", 3);
+        Assert.Equal(1, CanonicalAbi.MemorySize(e));
+        Assert.Equal(1, CanonicalAbi.MemoryAlign(e));
+    }
+
+    [Fact]
+    public void EnumMemoryIsTwoBytesForLargeEnum()
+    {
+        var e = new WitEnumType(TestPackage, "big", 300);
+        Assert.Equal(2, CanonicalAbi.MemorySize(e));
+        Assert.Equal(2, CanonicalAbi.MemoryAlign(e));
+    }
+
+    [Fact]
+    public void VariantMemoryLayoutSmallAlignment()
+    {
+        // variant { a(u8), b(u16) }: disc u8(1), payload align 2 -> offset 2, size align_to(2+2,2)=4
+        var v = new WitVariantType(TestPackage, "v",
+            new EquatableArray<WitVariantCase>(new[]
+            {
+                new WitVariantCase("a", WitType.U8),
+                new WitVariantCase("b", WitType.U16),
+            }));
+        Assert.Equal(1, CanonicalAbi.VariantDiscSize(v));
+        Assert.Equal(2, CanonicalAbi.VariantPayloadOffset(v));
+        Assert.Equal(4, CanonicalAbi.MemorySize(v));
+        Assert.Equal(2, CanonicalAbi.MemoryAlign(v));
+    }
+
+    [Fact]
+    public void VariantMemoryLayoutWithF64Payload()
+    {
+        // variant { a(f64), b }: disc u8(1), payload align 8 -> offset 8, size 16, align 8
+        var v = new WitVariantType(TestPackage, "v",
+            new EquatableArray<WitVariantCase>(new[]
+            {
+                new WitVariantCase("a", WitType.F64),
+                new WitVariantCase("b", null),
+            }));
+        Assert.Equal(8, CanonicalAbi.VariantPayloadOffset(v));
+        Assert.Equal(16, CanonicalAbi.MemorySize(v));
+        Assert.Equal(8, CanonicalAbi.MemoryAlign(v));
+    }
+
+    [Fact]
+    public void ResultMemoryLayoutNotFlooredAtFour()
+    {
+        // result<u8,u8>: disc u8(1), payload align/size 1 -> offset 1, size align_to(1+1,1)=2, align 1
+        var r = new WitResultType(WitType.U8, WitType.U8);
+        Assert.Equal(2, CanonicalAbi.MemorySize(r));
+        Assert.Equal(1, CanonicalAbi.MemoryAlign(r));
     }
 
     #endregion

@@ -1,0 +1,56 @@
+package tecs:ecs;
+
+interface ecs {
+    resource app {
+        add-systems: func(stage: stage-label, systems: list<borrow<system>>);
+    }
+
+    resource system {
+        constructor(name: string);
+        add-commands: func();
+        add-query: func(query: list<query-term>);
+        after: func(other: borrow<system>);
+        before: func(other: borrow<system>);
+    }
+
+    resource commands {
+        spawn: func() -> entity-commands;
+        entity: func(entity: entity) -> entity-commands;
+        despawn: func(entity: entity);
+        remove-component: func(entity: entity, type-path: type-path);
+    }
+
+    resource entity-commands {
+        id: func() -> entity;
+        remove: func(types: list<type-path>);
+        despawn: func();
+    }
+
+    record entity {
+        id: s32,
+        generation: s32,
+    }
+
+    resource query {
+        iter: func() -> bool;
+    }
+
+    type type-path = string;
+
+    variant stage-label {
+        startup,
+        first,
+        pre-update,
+        update,
+        post-update,
+        last,
+        custom(string),
+    }
+
+    variant query-term {
+        ref(type-path),
+        mut(type-path),
+        %with(type-path),
+        without(type-path),
+    }
+}

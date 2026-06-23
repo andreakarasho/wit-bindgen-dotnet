@@ -1,0 +1,27 @@
+package tecs:example;
+
+world guest {
+    import tecs:ecs/ecs;
+
+    use tecs:ecs/ecs.{app, query, commands, entity};
+
+    // Per-component typed accessors (game-specific, operate on query's current row)
+    import get-position: func(q: borrow<query>, index: u8) -> position;
+    import set-position: func(q: borrow<query>, index: u8, value: position);
+    import get-velocity: func(q: borrow<query>, index: u8) -> velocity;
+    import set-velocity: func(q: borrow<query>, index: u8, value: velocity);
+    import commands-set-position: func(cmds: borrow<commands>, entity: entity, value: position);
+    import commands-set-velocity: func(cmds: borrow<commands>, entity: entity, value: velocity);
+
+    // Batch accessors — get/set all values for a component column at once
+    import get-positions: func(q: borrow<query>, index: u8) -> list<position>;
+    import set-positions: func(q: borrow<query>, index: u8, values: list<position>);
+    import get-velocities: func(q: borrow<query>, index: u8) -> list<velocity>;
+    import set-velocities: func(q: borrow<query>, index: u8, values: list<velocity>);
+
+    record position { x: f32, y: f32 }
+    record velocity { x: f32, y: f32 }
+
+    export setup: func(app: app);
+    export run-system: func(index: u32, query: option<query>, commands: option<commands>);
+}

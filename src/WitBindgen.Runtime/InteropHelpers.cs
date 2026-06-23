@@ -65,3 +65,43 @@ public static unsafe class InteropHelpers
         return (nint)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(ReturnAreaBuffer));
     }
 }
+
+/// <summary>
+/// A ref struct that owns a span of unmanaged memory allocated by the host.
+/// Disposes by freeing the underlying allocation. Use with <c>using</c>.
+/// </summary>
+public unsafe ref struct OwnedSpan<T> where T : unmanaged
+{
+    private byte* _ptr;
+    private readonly int _byteLen;
+    private readonly int _align;
+
+    /// <summary>The typed span over the owned memory.</summary>
+    public Span<T> Span;
+
+    /// <summary>Number of elements in the owned span.</summary>
+    public int Length => Span.Length;
+
+    /// <summary>Element access by index (returns a mutable reference into the owned memory).</summary>
+    public ref T this[int index] => ref Span[index];
+
+    /// <summary>Implicit view as a ReadOnlySpan for passing to APIs that take one.</summary>
+    public static implicit operator ReadOnlySpan<T>(OwnedSpan<T> owned) => owned.Span;
+
+    public OwnedSpan(byte* ptr, int elementCount, int byteLen, int align)
+    {
+        _ptr = ptr;
+        _byteLen = byteLen;
+        _align = align;
+        Span = new Span<T>(ptr, elementCount);
+    }
+
+    public void Dispose()
+    {
+        if (_ptr != null)
+        {
+            InteropHelpers.Free(_ptr, _byteLen, _align);
+            _ptr = null;
+        }
+    }
+}

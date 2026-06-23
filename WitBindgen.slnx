@@ -7,5 +7,7 @@
     <Project Path="examples/HelloWorld/HelloWorld.csproj" />
     <Project Path="examples/Calculator/Calculator.csproj" />
     <Project Path="examples/CalculatorHost/CalculatorHost.csproj" />
+    <Project Path="examples/EcsGuest/EcsGuest.csproj" />
+    <Project Path="examples/EcsHost/EcsHost.csproj" />
   </Folder>
 </Solution>

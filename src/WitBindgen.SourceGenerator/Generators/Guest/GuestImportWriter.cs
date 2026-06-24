@@ -230,7 +230,7 @@ public static class GuestImportWriter
                     }
                     else
                     {
-                        sb.AppendLine($"var resultList = new {CanonicalAbi.WitListElementTypeToCS(resultListType)}[resultListCount];");
+                        sb.AppendLine($"var resultList = {CanonicalAbi.NewArray(CanonicalAbi.WitListElementTypeToCS(resultListType), "resultListCount")};");
                         sb.AppendLine("for (int resultIdx = 0; resultIdx < resultListCount; resultIdx++)");
                         using (sb.Block())
                         {
@@ -845,7 +845,8 @@ public static class GuestImportWriter
                 }
                 break;
             default:
-                sb.AppendLine($"// TODO: lower list element of type {elemType.Kind}");
+                // Flags/option/result/nested-list: delegate to the canonical-layout store.
+                WriteMemoryStore(sb, elemType, elemExpr, baseVar, 0);
                 break;
         }
     }
@@ -930,6 +931,95 @@ public static class GuestImportWriter
                         WriteMemoryStore(sb, et, $"{expr}.Item{ti + 1}", baseVar, fieldOffset);
                         fieldOffset += CanonicalAbi.MemorySize(et);
                     }
+                }
+                break;
+            case WitTypeKind.Flags:
+                // Flags lift reads with `*(int*)`; store the same width.
+                sb.AppendLine($"*(int*)({offsetExpr}) = (int){expr};");
+                break;
+            case WitTypeKind.Variant:
+                if (type is WitVariantType varStoreType)
+                {
+                    var discKw = CanonicalAbi.IntStoreKeyword(CanonicalAbi.VariantDiscSize(varStoreType));
+                    sb.AppendLine($"*({discKw}*)({offsetExpr}) = ({discKw}){expr}.Discriminant;");
+                    var payloadOffset = offset + CanonicalAbi.VariantPayloadOffset(varStoreType);
+                    sb.AppendLine($"switch ({expr}.Discriminant)");
+                    using (sb.Block())
+                    {
+                        foreach (var c in varStoreType.Values)
+                        {
+                            if (c.Type is not null)
+                            {
+                                var caseName = StringUtils.GetName(c.Name);
+                                sb.AppendLine($"case {CanonicalAbi.WitTypeToCS(type)}.Case.{caseName}:");
+                                sb.IncrementIndent();
+                                WriteMemoryStore(sb, c.Type, $"{expr}.{caseName}Payload", baseVar, payloadOffset);
+                                sb.AppendLine("break;");
+                                sb.DecrementIndent();
+                            }
+                        }
+                    }
+                }
+                break;
+            case WitTypeKind.Option:
+                if (type is WitOptionType optStoreType)
+                {
+                    var inner = CanonicalAbi.ResolveType(optStoreType.ElementType);
+                    var payloadOffset = offset + CanonicalAbi.AlignTo(1, CanonicalAbi.MemoryAlign(inner));
+                    var optVal = $"optStore{s_memStoreCounter++}";
+                    // `is {} v` unwraps both Nullable<T> (value) and nullable reference forms.
+                    sb.AppendLine($"if ({expr} is {{}} {optVal})");
+                    using (sb.Block())
+                    {
+                        sb.AppendLine($"*(byte*)({offsetExpr}) = 1;");
+                        WriteMemoryStore(sb, inner, optVal, baseVar, payloadOffset);
+                    }
+                    sb.AppendLine("else");
+                    using (sb.Block())
+                    {
+                        sb.AppendLine($"*(byte*)({offsetExpr}) = 0;");
+                    }
+                }
+                break;
+            case WitTypeKind.Result:
+            {
+                var (okT, errT) = CanonicalAbi.ResultArms(type);
+                var payloadOffset = offset + CanonicalAbi.ResultPayloadOffset(type);
+                sb.AppendLine($"if ({expr}.IsOk)");
+                using (sb.Block())
+                {
+                    sb.AppendLine($"*(byte*)({offsetExpr}) = 0;");
+                    if (okT is not null)
+                        WriteMemoryStore(sb, okT, $"{expr}.Ok", baseVar, payloadOffset);
+                }
+                sb.AppendLine("else");
+                using (sb.Block())
+                {
+                    sb.AppendLine($"*(byte*)({offsetExpr}) = 1;");
+                    if (errT is not null)
+                        WriteMemoryStore(sb, errT, $"{expr}.Err", baseVar, payloadOffset);
+                }
+                break;
+            }
+            case WitTypeKind.List:
+                if (type is WitListType listStoreType)
+                {
+                    var elemSize = CanonicalAbi.MemorySize(listStoreType.ElementType);
+                    var elemAlign = CanonicalAbi.MemoryAlign(listStoreType.ElementType);
+                    var n = s_memStoreCounter++;
+                    var cntVar = $"lstStore{n}Count";
+                    var ptrVar = $"lstStore{n}Ptr";
+                    // Nested lists own a heap buffer the callee frees (canonical ABI transfers
+                    // ownership), so allocate with InteropHelpers.Alloc — not a stack/pool buffer.
+                    sb.AppendLine($"var {cntVar} = {expr}.Length;");
+                    sb.AppendLine($"var {ptrVar} = (byte*)WitBindgen.Runtime.InteropHelpers.Alloc({cntVar} * {elemSize}, {elemAlign});");
+                    sb.AppendLine($"for (int {ptrVar}Idx = 0; {ptrVar}Idx < {cntVar}; {ptrVar}Idx++)");
+                    using (sb.Block())
+                    {
+                        WriteListElementLower(sb, listStoreType.ElementType, $"{expr}[{ptrVar}Idx]", $"({ptrVar} + {ptrVar}Idx * {elemSize})");
+                    }
+                    sb.AppendLine($"*(int*)({offsetExpr}) = (int){ptrVar};");
+                    sb.AppendLine($"*(int*)({offsetExpr} + 4) = {cntVar};");
                 }
                 break;
             default:
@@ -1128,7 +1218,7 @@ public static class GuestImportWriter
                     }
                     else
                     {
-                        sb.AppendLine($"var {lvar} = new {elemCs}[{lvar}Count];");
+                        sb.AppendLine($"var {lvar} = {CanonicalAbi.NewArray(elemCs, $"{lvar}Count")};");
                         sb.AppendLine($"for (int {lvar}Idx = 0; {lvar}Idx < {lvar}Count; {lvar}Idx++)");
                         using (sb.Block())
                         {
@@ -1212,6 +1302,12 @@ public static class GuestImportWriter
                 sb.AppendLine($"return {rawVar} == 0 ? {csType}.FromOk(default) : {csType}.FromErr(default);");
                 break;
             }
+            case WitTypeKind.Resource:
+            case WitTypeKind.Borrow:
+                // A bare resource handle returned by value (own<r> / borrow<r> from a plain func):
+                // wrap the i32 handle, not a `(Conn)rawVar` cast (int -> class is invalid, CS0030).
+                sb.AppendLine($"return {GetResourceConstructorCall(type, rawVar)};");
+                break;
             default:
                 sb.AppendLine($"return ({CanonicalAbi.WitTypeToCS(type)}){rawVar};");
                 break;
@@ -1325,9 +1421,13 @@ public static class GuestImportWriter
                 }
                 break;
             default:
-                sb.AppendLine($"// TODO: lift list element of type {elemType.Kind}");
-                sb.AppendLine($"{listVar}[{idxVar}] = default;");
+            {
+                // Variant/option/result/flags/nested-list: delegate to the canonical-layout
+                // loader. Unique prefix avoids CS0136 when the element type nests the same kind.
+                var lifted = WriteMemoryLoad(sb, elemType, baseVar, 0, $"le{s_memStoreCounter++}");
+                sb.AppendLine($"{listVar}[{idxVar}] = {lifted};");
                 break;
+            }
         }
     }
 
@@ -1339,7 +1439,8 @@ public static class GuestImportWriter
                 sb.AppendLine($"WitBindgen.Runtime.InteropHelpers.Free((void*)*(int*){baseVar}, *(int*)({baseVar} + 4), 1);");
                 break;
             case WitTypeKind.List:
-                // TODO: nested list cleanup
+                // No-op: WriteLiftListElement lifts a nested list via WriteMemoryLoad, which
+                // frees the inner buffer during the lift. Freeing here would double-free.
                 break;
         }
     }
@@ -1466,19 +1567,41 @@ public static class GuestImportWriter
 
         if (isFallible)
         {
-            // Fallible constructor -> static factory method
+            // Fallible constructor -> static factory returning the WIT result<own<r>, e>.
+            // result<own<r>, e> always exceeds MaxFlatResults (discriminant + handle), so the
+            // host lowers it via a return pointer — this is unconditionally the retptr path.
             var highLevelParams = new List<string>();
             foreach (var param in ctor.Parameters)
             {
                 highLevelParams.Add($"{CanonicalAbi.WitTypeToCSParam(param.Type)} {param.CSharpVariableName}");
             }
 
+            var resultType = CanonicalAbi.ResolveType(ctor.ReturnType!);
+            var returnCs = CanonicalAbi.WitTypeToCS(ctor.ReturnType!);
+            var retFlatCount = (CanonicalAbi.MemorySize(resultType) + 3) / 4;
+
             sb.AppendLine("[global::System.Runtime.CompilerServices.SkipLocalsInit]");
-            sb.AppendLine($"public static unsafe {className} Create({string.Join(", ", highLevelParams)})");
+            sb.AppendLine($"public static unsafe {returnCs} Create({string.Join(", ", highLevelParams)})");
             using (sb.Block())
             {
-                sb.AppendLine($"// TODO: fallible constructor returns {CanonicalAbi.WitTypeToCS(ctor.ReturnType!)} — full result lifting not yet implemented");
-                sb.AppendLine($"throw new global::System.NotImplementedException(\"Fallible resource constructors are not yet supported.\");");
+                var callArgs = new List<string>();
+                foreach (var param in ctor.Parameters)
+                {
+                    WriteLowerParam(sb, param, callArgs);
+                }
+
+                sb.AppendLine($"int* retArea = stackalloc int[{Math.Max(retFlatCount, 2)}];");
+                callArgs.Add("(nint)retArea");
+                sb.AppendLine($"{wasmImports}.Constructor({string.Join(", ", callArgs)});");
+
+                foreach (var param in ctor.Parameters)
+                {
+                    WriteResourceParamCleanup(sb, param);
+                }
+
+                // Lift result<own<r>, e>: the ok arm constructs `new ClassName(handle, owned: true)`.
+                var lifted = WriteMemoryLoad(sb, resultType, "(byte*)retArea", 0, "ctorRet");
+                sb.AppendLine($"return {lifted};");
             }
         }
         else
@@ -1648,7 +1771,7 @@ public static class GuestImportWriter
                         }
                         else
                         {
-                            sb.AppendLine($"var resultList = new {CanonicalAbi.WitListElementTypeToCS(resultListType)}[resultListCount];");
+                            sb.AppendLine($"var resultList = {CanonicalAbi.NewArray(CanonicalAbi.WitListElementTypeToCS(resultListType), "resultListCount")};");
                             sb.AppendLine("for (int resultIdx = 0; resultIdx < resultListCount; resultIdx++)");
                             using (sb.Block())
                             {
@@ -1721,12 +1844,9 @@ public static class GuestImportWriter
         sb.AppendLine("internal static partial class WasmImports");
         using (sb.Block())
         {
-            // Constructor(s)
+            // Constructor (at most one, enforced at parse time).
             foreach (var ctor in resource.Constructors)
             {
-                if (ctor.ReturnType != null)
-                    continue; // Skip fallible constructors since they're not implemented
-
                 var flatParams = new List<(string type, string name)>();
                 int paramIdx = 0;
                 foreach (var param in ctor.Parameters)
@@ -1739,11 +1859,20 @@ public static class GuestImportWriter
                     }
                 }
 
-                var paramListStr = string.Join(", ", flatParams.Select(p => $"{p.type} {p.name}"));
+                var ctorParamList = flatParams.Select(p => $"{p.type} {p.name}").ToList();
 
                 sb.AppendLine($"[global::System.Runtime.InteropServices.DllImport(\"{moduleName}\", EntryPoint = \"[constructor]{witName}\")]");
                 sb.AppendLine("[global::System.Runtime.InteropServices.WasmImportLinkage]");
-                sb.AppendLine($"internal static extern int Constructor({paramListStr});");
+                if (ctor.ReturnType != null)
+                {
+                    // Fallible: result<own<r>, e> always lowers via a return pointer (void + retPtr).
+                    ctorParamList.Add("nint retPtr");
+                    sb.AppendLine($"internal static extern void Constructor({string.Join(", ", ctorParamList)});");
+                }
+                else
+                {
+                    sb.AppendLine($"internal static extern int Constructor({string.Join(", ", ctorParamList)});");
+                }
                 sb.AppendLine();
             }
 

@@ -157,6 +157,13 @@ public class WitTypeVisitor(WitPackageNameVersion package) : WitParserBaseVisito
         );
     }
 
+    // `own<r>` is the explicit spelling of an owned resource handle; a bare resource name
+    // already means owned, so the inner type carries the right (Resource) semantics as-is.
+    public override WitType VisitOwnType(WitParser.OwnTypeContext context)
+    {
+        return Visit(context.type());
+    }
+
     public override WitType VisitS32Type(WitParser.S32TypeContext context)
     {
         return WitType.S32;

@@ -698,10 +698,37 @@ interface types {
         GuestImportWriter.WriteImportResource(sb, "my:pkg/types@1.0.0", resource!);
         var code = sb.ToString();
 
-        // Should have a static factory method instead of public constructor
+        // Fallible constructor -> static factory returning the WIT result<own<blob2>, _>.
+        // (Resource-resolution-dependent lifting of the ok arm is gated by the full-generator
+        // semantic test GeneratedImportFallibleConstructorBindsAndCompiles; this direct
+        // WriteImportResource call has no type resolver, so assert only resolver-independent shape.)
         Assert.Contains("public class Blob2 : global::System.IDisposable", code);
-        Assert.Contains("static unsafe Blob2 Create(", code);
-        Assert.Contains("NotImplementedException", code);
+        Assert.Contains("WitResult<Blob2, byte> Create(", code);
+        Assert.DoesNotContain("NotImplementedException", code);
+        // Fallible ctor lowers via a return pointer (void + retPtr), not a bare i32.
+        Assert.Contains("internal static extern void Constructor(", code);
+        Assert.Contains("[constructor]blob2", code);
+    }
+
+    [Fact]
+    public void ResourceWithMultipleConstructorsReportsDiagnostic()
+    {
+        // WIT spec: a resource has at most one constructor. The parser rejects more, surfaced as
+        // WBGEN002 (the pipeline wraps the thrown InvalidOperationException into a diagnostic).
+        var wit = @"
+package my:pkg@1.0.0;
+
+interface t {
+    resource conn {
+        constructor(a: u32);
+        constructor(b: string);
+    }
+}
+";
+        var directory = Wit.Parse(wit);
+
+        Assert.False(directory.Diagnostics.IsDefaultOrEmpty);
+        Assert.Contains(directory.Diagnostics, d => d.Descriptor.Id == "WBGEN002");
     }
 
     [Fact]

@@ -166,6 +166,111 @@ public static partial class W
         AssertCompiles(wit, impl);
     }
 
+    [Fact]
+    public void GeneratedImportOwnTypeBindsAndCompiles()
+    {
+        // #1: explicit `own<r>` syntax now parses (lexer had the `Own` token but the grammar had
+        // no production). It means the same as a bare owned resource, so it must lower as a handle
+        // and lift as `new Conn(handle, owned: true)`.
+        var wit = @"
+package my:pkg@1.0.0;
+
+interface t {
+    resource conn {
+        ping: func() -> bool;
+    }
+    open: func() -> own<conn>;
+    close: func(c: own<conn>);
+}
+
+world w { import t; }
+";
+        var code = AssertCompiles(wit);
+        Assert.Contains("owned: true", code);
+    }
+
+    [Fact]
+    public void GeneratedImportFallibleConstructorBindsAndCompiles()
+    {
+        // #5: a fallible resource constructor (`constructor(...) -> result<own<r>, e>`) lowers via
+        // a return pointer and lifts result<own<conn>, u32> into a static factory. The ok arm
+        // self-references the resource being defined, so this also gates that resolution path.
+        var wit = @"
+package my:pkg@1.0.0;
+
+interface t {
+    resource conn {
+        constructor(addr: string) -> result<conn, u32>;
+        ping: func() -> bool;
+    }
+}
+
+world w { import t; }
+";
+        var code = AssertCompiles(wit);
+        Assert.Contains("WitResult<Conn, uint> Create(", code);
+        Assert.Contains("internal static extern void Constructor(", code);
+        Assert.DoesNotContain("NotImplementedException", code);
+    }
+
+    [Fact]
+    public void GeneratedImportNestedListsBindAndCompile()
+    {
+        // #7: list elements of option/result/nested-list/flags/variant. Import echo functions
+        // lower the param list (WriteLowerListElement) and lift the return list
+        // (WriteLiftListElement) — both previously fell to a `// TODO` default.
+        var wit = @"
+package my:pkg@1.0.0;
+
+interface t {
+    flags fl { a, b, c }
+    variant v { none, num(u32), text(string) }
+
+    echo-opts: func(xs: list<option<u32>>) -> list<option<u32>>;
+    echo-results: func(xs: list<result<u32, string>>) -> list<result<u32, string>>;
+    echo-nested: func(xs: list<list<u32>>) -> list<list<u32>>;
+    echo-flags: func(xs: list<fl>) -> list<fl>;
+    echo-variants: func(xs: list<v>) -> list<v>;
+}
+
+world w { import t; }
+";
+        AssertCompiles(wit);
+    }
+
+    [Fact]
+    public void GeneratedExportNestedListsBindAndCompile()
+    {
+        // #7 export side: params are lifted (WriteLiftListElement + WriteMemoryLoad, which the
+        // export writer was missing for option/result/variant/list) and returns lowered.
+        var wit = @"
+package my:pkg@1.0.0;
+
+world w {
+    flags fl { a, b, c }
+    variant v { none, num(u32), text(string) }
+
+    export echo-opts: func(xs: list<option<u32>>) -> list<option<u32>>;
+    export echo-results: func(xs: list<result<u32, string>>) -> list<result<u32, string>>;
+    export echo-nested: func(xs: list<list<u32>>) -> list<list<u32>>;
+    export echo-flags: func(xs: list<fl>) -> list<fl>;
+    export echo-variants: func(xs: list<v>) -> list<v>;
+}
+";
+        var impl = @"
+namespace Wit.My.Pkg;
+public static partial class W
+{
+    public static partial uint?[] EchoOpts(uint?[] xs) => xs;
+    public static partial global::WitBindgen.Runtime.WitResult<uint, string>[] EchoResults(global::WitBindgen.Runtime.WitResult<uint, string>[] xs) => xs;
+    public static partial uint[][] EchoNested(uint[][] xs) => xs;
+    public static partial Fl[] EchoFlags(Fl[] xs) => xs;
+    public static partial V[] EchoVariants(V[] xs) => xs;
+}
+";
+        AssertCompiles(wit, impl);
+    }
+
     /// <summary>
     /// Runs the guest generator over <paramref name="witContent"/> and asserts the generated
     /// trees bind with no C# errors. Returns the concatenated generated source for callers that

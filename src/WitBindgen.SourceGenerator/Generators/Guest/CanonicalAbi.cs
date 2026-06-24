@@ -815,6 +815,19 @@ public static class CanonicalAbi
         return WitTypeToCS(lt.ElementType);
     }
 
+    /// <summary>
+    /// Builds a <c>new T[count]</c> allocation. When the element C# type is itself an array
+    /// (a jagged list&lt;list&lt;...&gt;&gt; element, e.g. <c>uint[]</c>), the size must go in the
+    /// first bracket pair — <c>new uint[count][]</c>, not the malformed <c>new uint[][count]</c>.
+    /// </summary>
+    public static string NewArray(string elemCs, string countExpr)
+    {
+        int idx = elemCs.IndexOf('[');
+        return idx >= 0
+            ? $"new {elemCs.Substring(0, idx)}[{countExpr}]{elemCs.Substring(idx)}"
+            : $"new {elemCs}[{countExpr}]";
+    }
+
     private static string ResolveCustomTypeName(string name)
     {
         if (s_typeNameMap != null && s_typeNameMap.TryGetValue(name, out var mapped))

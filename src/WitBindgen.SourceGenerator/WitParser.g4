@@ -40,6 +40,7 @@ type
     | Tuple OpenAngle (type (Comma type)*)? CloseAngle                          # TupleType
     | func                                                                      # FuncType
     | Borrow OpenAngle type CloseAngle                                          # BorrowType
+    | Own OpenAngle type CloseAngle                                             # OwnType
     ;
 
 func

@@ -347,6 +347,14 @@ public class Wit
                 })
                 .ToArray();
 
+            // WIT spec: a resource has at most one constructor.
+            if (constructors.Length > 1)
+            {
+                throw new InvalidOperationException(
+                    $"Resource '{name}' declares {constructors.Length} constructors; WIT allows at most one. " +
+                    "Use a static function returning result<...> for additional/fallible construction paths.");
+            }
+
             var allMethods = resourceContext.resourceMethod()
                 .OfType<WitParser.ResourceFunctionContext>()
                 .Select(x => (

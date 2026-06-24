@@ -17,15 +17,27 @@ public static class GuestWriter
     public static void GenerateGuestBindings(
         SourceProductionContext context,
         ImmutableArray<KeyValuePair<WitPackageName, WitPackage>> packages)
+        => GenerateGuestBindings(context, packages, default);
+
+    public static void GenerateGuestBindings(
+        SourceProductionContext context,
+        ImmutableArray<KeyValuePair<WitPackageName, WitPackage>> packages,
+        ImmutableArray<WitPackageName> rootPackageNames)
     {
         if (packages.IsDefaultOrEmpty)
             return;
+
+        // When no root set is supplied (legacy callers), every package is treated as root.
+        var rootSet = rootPackageNames.IsDefaultOrEmpty
+            ? null
+            : new HashSet<WitPackageName>(rootPackageNames);
 
         var resolver = new ProjectTypeContainerResolver(packages.Select(p => p.Value));
 
         foreach (var kv in packages)
         {
             var package = kv.Value;
+            var isRoot = rootSet is null || rootSet.Contains(kv.Key);
 
             foreach (var versionKv in package.Versions)
             {
@@ -34,7 +46,11 @@ public static class GuestWriter
                 // Generate types from top-level definitions (interfaces at package level)
                 GeneratePackageTypes(context, kv.Key, versionKv.Key, version, resolver);
 
-                // Generate world bindings
+                // World bindings only for root packages — a dependency's worlds are not
+                // ours to implement (see ComponentGuestGenerator.IsDepsPath).
+                if (!isRoot)
+                    continue;
+
                 foreach (var worldKv in version.Worlds)
                 {
                     GenerateWorld(context, kv.Key, versionKv.Key, worldKv.Key, worldKv.Value, resolver);
@@ -352,8 +368,11 @@ public static class GuestWriter
                     }
                     else
                     {
-                        // Complex type from another package - use fully qualified name
-                        var typeName = StringUtils.GetName(useItem.Name);
+                        // Complex type from another package - use fully qualified name.
+                        // ResourceClassName keeps the disambiguation in sync with the
+                        // resource declaration (a resource named like its interface ->
+                        // "<Name>Resource"); a no-op for every other type.
+                        var typeName = StringUtils.ResourceClassName(interfaceName, useItem.Name);
                         map[useItem.Alias] = $"global::Wit.{nsPath}.{interfaceName}.{typeName}";
                     }
                 }

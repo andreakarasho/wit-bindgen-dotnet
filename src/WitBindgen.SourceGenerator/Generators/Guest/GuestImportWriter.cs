@@ -491,9 +491,14 @@ public static class GuestImportWriter
                                     sb.IncrementIndent();
                                     var caseCallArgs = new List<string>();
                                     WriteLowerFlat(sb, @case.Type, $"{varName}.{caseName}Payload", caseCallArgs);
+                                    var caseFlat = CanonicalAbi.Flatten(@case.Type);
                                     for (int i = 0; i < caseCallArgs.Count && i < tempVars.Count; i++)
                                     {
-                                        sb.AppendLine($"{tempVars[i]} = {caseCallArgs[i]};");
+                                        // The slot type is the canonical-ABI join across ALL cases
+                                        // (e.g. an f32 case position joined with an i32 case -> i32);
+                                        // reinterpret this case's value into the joined slot.
+                                        var fromCt = i < caseFlat.Count ? caseFlat[i] : payloadFlat[i + 1];
+                                        sb.AppendLine($"{tempVars[i]} = {CoerceFlatToSlot(caseCallArgs[i], fromCt, payloadFlat[i + 1])};");
                                     }
                                     sb.AppendLine("break;");
                                     sb.DecrementIndent();
@@ -550,8 +555,12 @@ public static class GuestImportWriter
             {
                 var armArgs = new List<string>();
                 WriteLowerFlat(sb, armType, accessor, armArgs);
+                var armFlat = CanonicalAbi.Flatten(armType);
                 for (int i = 0; i < armArgs.Count && i < tempVars.Count; i++)
-                    sb.AppendLine($"{tempVars[i]} = {armArgs[i]};");
+                {
+                    var fromCt = i < armFlat.Count ? armFlat[i] : payloadFlat[i + 1];
+                    sb.AppendLine($"{tempVars[i]} = {CoerceFlatToSlot(armArgs[i], fromCt, payloadFlat[i + 1])};");
+                }
             }
         }
 
@@ -565,8 +574,12 @@ public static class GuestImportWriter
                 {
                     var armArgs = new List<string>();
                     WriteLowerFlat(sb, errT, $"{expr}.Err", armArgs);
+                    var armFlat = CanonicalAbi.Flatten(errT);
                     for (int i = 0; i < armArgs.Count && i < tempVars.Count; i++)
-                        sb.AppendLine($"{tempVars[i]} = {armArgs[i]};");
+                    {
+                        var fromCt = i < armFlat.Count ? armFlat[i] : payloadFlat[i + 1];
+                        sb.AppendLine($"{tempVars[i]} = {CoerceFlatToSlot(armArgs[i], fromCt, payloadFlat[i + 1])};");
+                    }
                 }
             }
         }
@@ -576,6 +589,29 @@ public static class GuestImportWriter
         }
 
         callArgs.AddRange(tempVars);
+    }
+
+    /// <summary>
+    /// Reinterprets a lowered flat value into a differently-typed join slot. The canonical
+    /// ABI flattens a variant/result by joining core types per position across all cases
+    /// (e.g. an f32 in one case and an i32 in another collapse to i32). When a case's value
+    /// is stored into a wider/retyped slot, a numeric assignment would be wrong (or fail to
+    /// compile: float -> int); reinterpret the bits instead. A no-op when the types match.
+    /// </summary>
+    private static string CoerceFlatToSlot(string expr, CoreWasmType from, CoreWasmType to)
+    {
+        if (from == to)
+            return expr;
+        return (from, to) switch
+        {
+            // float packed into an integer join slot — reinterpret the bit pattern.
+            (CoreWasmType.F32, CoreWasmType.I32) => $"global::System.BitConverter.SingleToInt32Bits({expr})",
+            (CoreWasmType.F64, CoreWasmType.I64) => $"global::System.BitConverter.DoubleToInt64Bits({expr})",
+            (CoreWasmType.F32, CoreWasmType.I64) => $"(long)(uint)global::System.BitConverter.SingleToInt32Bits({expr})",
+            // narrower integer widened into an i64 join slot.
+            (CoreWasmType.I32, CoreWasmType.I64) => $"(long){expr}",
+            _ => expr
+        };
     }
 
     private static void WriteLowerFlat(IndentedStringBuilder sb, WitType type, string expr, List<string> callArgs)
@@ -1330,7 +1366,10 @@ public static class GuestImportWriter
         string moduleName,
         WitResource resource)
     {
-        var className = resource.CSharpName;
+        // Disambiguate against a same-named enclosing interface (CS0542): e.g. the
+        // `app` resource inside interface `app` becomes `AppResource`. No-op otherwise.
+        var className = StringUtils.ResourceClassName(
+            StringUtils.GetName(StringUtils.InterfaceNameFromModule(moduleName)), resource.Name);
         var borrowName = $"{className}Borrow";
         var witName = resource.Name;
 

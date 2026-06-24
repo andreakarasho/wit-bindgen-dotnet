@@ -703,6 +703,47 @@ public static class CanonicalAbi
     }
 
     /// <summary>
+    /// True if the C# representation of this type holds a managed reference (string, array,
+    /// owned resource class, or any aggregate transitively containing one). Used to decide a
+    /// variant's struct layout: an explicit-overlap layout (all payloads at the same offset)
+    /// is illegal when a reference field would overlap a value field, so such variants must
+    /// use a non-overlapping layout. Borrows are value structs (a handle int) -> not refs.
+    /// </summary>
+    public static bool ContainsReference(WitType type)
+    {
+        type = ResolveType(type);
+        switch (type.Kind)
+        {
+            case WitTypeKind.String:
+            case WitTypeKind.List:
+            case WitTypeKind.Resource:
+                return true;
+            case WitTypeKind.Record:
+                if (type is WitRecordType rt)
+                    foreach (var f in rt.Fields)
+                        if (ContainsReference(f.Type)) return true;
+                return false;
+            case WitTypeKind.Tuple:
+                if (type is WitTupleType tt)
+                    foreach (var e in tt.ElementTypes)
+                        if (ContainsReference(e)) return true;
+                return false;
+            case WitTypeKind.Option:
+                return type is WitOptionType ot && ContainsReference(ot.ElementType);
+            case WitTypeKind.Variant:
+                if (type is WitVariantType vt)
+                    foreach (var c in vt.Values)
+                        if (c.Type is not null && ContainsReference(c.Type)) return true;
+                return false;
+            case WitTypeKind.Result:
+                var (ok, err) = ResultArms(type);
+                return (ok is not null && ContainsReference(ok)) || (err is not null && ContainsReference(err));
+            default:
+                return false;
+        }
+    }
+
+    /// <summary>
     /// Returns the C# type name for a WIT type (for high-level API).
     /// Lists map to T[] (arrays) by default.
     /// </summary>

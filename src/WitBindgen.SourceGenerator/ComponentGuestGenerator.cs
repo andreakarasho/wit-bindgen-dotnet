@@ -28,9 +28,29 @@ public class ComponentGuestGenerator : IIncrementalGenerator
             .SelectMany((x, _) => x.Packages)
             .Collect();
 
+        // Root packages = those defined outside a `deps/` directory. World bindings
+        // (export stubs) are generated ONLY for root packages; a dependency's own worlds
+        // (e.g. tinyecs:modding's `host`/`guest`) are not ours to implement and would emit
+        // unimplemented-partial / mis-qualified export stubs. Types are still generated for
+        // every package (imports need them).
+        var rootPackageNames = rawWitFiles
+            .Where(d => !IsDepsPath(d.Path))
+            .Select(ParseWitDirectory)
+            .SelectMany((wd, _) => wd.Packages.Keys)
+            .Collect();
+
         // Generate the guest bindings
-        context.RegisterSourceOutput(packages, GuestWriter.GenerateGuestBindings);
+        context.RegisterSourceOutput(
+            packages.Combine(rootPackageNames),
+            (ctx, pair) => GuestWriter.GenerateGuestBindings(ctx, pair.Left, pair.Right));
     }
+
+    /// <summary>
+    /// True if the WIT directory sits under a <c>deps/</c> segment (the WIT convention for
+    /// dependency packages), so its worlds should not be treated as the root world.
+    /// </summary>
+    private static bool IsDepsPath(string path)
+        => path.Replace('\\', '/').Contains("/deps/");
 
     /// <summary>
     /// Groups all files by their directory.

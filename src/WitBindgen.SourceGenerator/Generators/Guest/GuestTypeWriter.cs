@@ -52,22 +52,39 @@ public static class GuestTypeWriter
     {
         var name = StringUtils.GetName(variant.Name);
 
-        sb.AppendLine($"[global::System.Runtime.InteropServices.StructLayout(global::System.Runtime.InteropServices.LayoutKind.Explicit)]");
+        // Payloads share offset 4 via an explicit-overlap layout (compact, union-like).
+        // That is illegal when a managed reference (string/array/resource) would overlap a
+        // value-type payload — the CLR/ILC rejects the type ("field offset 4"). Such a
+        // variant falls back to a non-overlapping sequential layout. The on-the-wire ABI is
+        // packed field-by-field by the lowering code, so the C# layout is purely in-memory:
+        // either layout marshals identically.
+        var overlap = true;
+        foreach (var @case in variant.Cases)
+            if (@case.Type is not null && CanonicalAbi.ContainsReference(@case.Type))
+            {
+                overlap = false;
+                break;
+            }
+
+        if (overlap)
+            sb.AppendLine($"[global::System.Runtime.InteropServices.StructLayout(global::System.Runtime.InteropServices.LayoutKind.Explicit)]");
         sb.AppendLine($"public struct {name}");
         using (sb.Block())
         {
             // Discriminant field
-            sb.AppendLine("[global::System.Runtime.InteropServices.FieldOffset(0)]");
+            if (overlap)
+                sb.AppendLine("[global::System.Runtime.InteropServices.FieldOffset(0)]");
             sb.AppendLine("public Case Discriminant;");
             sb.AppendLine();
 
-            // Payload fields at offset 4 (overlapping)
+            // Payload fields (overlapping at offset 4, or sequential when non-overlap).
             foreach (var @case in variant.Cases)
             {
                 if (@case.Type is not null)
                 {
                     var caseName = StringUtils.GetName(@case.Name);
-                    sb.AppendLine("[global::System.Runtime.InteropServices.FieldOffset(4)]");
+                    if (overlap)
+                        sb.AppendLine("[global::System.Runtime.InteropServices.FieldOffset(4)]");
                     sb.AppendLine($"public {CanonicalAbi.WitTypeToCS(@case.Type)} {caseName}Payload;");
                 }
             }

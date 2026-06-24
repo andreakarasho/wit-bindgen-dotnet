@@ -536,6 +536,32 @@ public static class CanonicalAbi
     /// <summary>Byte size of a variant's discriminant in linear memory (1/2/4 by case count).</summary>
     public static int VariantDiscSize(WitVariantType variant) => DiscriminantSize(variant.Values.Length);
 
+    /// <summary>
+    /// The ok/err payload types of a result, or null for an absent arm
+    /// (<c>result&lt;t&gt;</c> has no err; <c>result&lt;_, e&gt;</c> has no ok).
+    /// </summary>
+    public static (WitType? ok, WitType? err) ResultArms(WitType type) => type switch
+    {
+        WitResultType rt => (rt.OkType, rt.ErrType),
+        WitResultNoErrorType noe => (noe.OkType, null),
+        WitResultNoResultType nor => (null, nor.ErrType),
+        _ => (null, null)
+    };
+
+    /// <summary>
+    /// Byte offset of a result's payload: the 1-byte discriminant aligned up to the max
+    /// alignment of its present arms. Mirrors the variant payload-offset rule.
+    /// </summary>
+    public static int ResultPayloadOffset(WitType type, ITypeContainerResolver? resolver = null)
+    {
+        resolver ??= s_resolver;
+        var (ok, err) = ResultArms(type);
+        int align = DiscriminantSize(2);
+        if (ok is not null) align = Math.Max(align, MemoryAlign(ok, resolver));
+        if (err is not null) align = Math.Max(align, MemoryAlign(err, resolver));
+        return AlignTo(DiscriminantSize(2), align);
+    }
+
     /// <summary>Max alignment among a variant's case payloads (minimum 1).</summary>
     public static int VariantMaxCaseAlign(WitVariantType variant, ITypeContainerResolver? resolver = null)
     {
@@ -707,11 +733,12 @@ public static class CanonicalAbi
             WitTypeKind.Flags => type is WitFlagsType ft ? ft.CSharpName : "int",
             WitTypeKind.Variant => type is WitVariantType vt ? vt.CSharpName : "object",
             WitTypeKind.Option => type is WitOptionType ot ? $"{WitTypeToCS(ot.ElementType)}?" : "object",
+            WitTypeKind.Result => ResultToCS(type),
             WitTypeKind.Tuple => type is WitTupleType tplt ? TupleToCS(tplt) : "object",
             WitTypeKind.Resource => type is WitResourceType rt ? rt.CSharpName : "int",
             WitTypeKind.Borrow => type is WitBorrowType bt
-                ? (bt.ElementType is WitResourceType brt ? brt.CSharpName
-                    : bt.ElementType is WitCustomType bct ? ResolveCustomTypeName(bct.Name)
+                ? (bt.ElementType is WitResourceType brt ? brt.CSharpName + "Borrow"
+                    : bt.ElementType is WitCustomType bct ? ResolveCustomTypeName(bct.Name) + "Borrow"
                     : "int")
                 : "int",
             WitTypeKind.User => type is WitCustomType ct ? UserTypeToCS(ct) : "object",
@@ -777,6 +804,19 @@ public static class CanonicalAbi
                 // Alias to a structural type — emit the underlying C# type.
                 return WitTypeToCS(resolved);
         }
+    }
+
+    /// <summary>
+    /// Maps a WIT result to <c>WitBindgen.Runtime.WitResult&lt;TOk, TErr&gt;</c>. Absent arms
+    /// (result&lt;t&gt; / result&lt;_, e&gt;) use a <c>byte</c> placeholder for the missing type
+    /// param — that arm carries no data and is never read.
+    /// </summary>
+    private static string ResultToCS(WitType type)
+    {
+        var (ok, err) = ResultArms(type);
+        var okCs = ok is not null ? WitTypeToCS(ok) : "byte";
+        var errCs = err is not null ? WitTypeToCS(err) : "byte";
+        return $"global::WitBindgen.Runtime.WitResult<{okCs}, {errCs}>";
     }
 
     /// <summary>

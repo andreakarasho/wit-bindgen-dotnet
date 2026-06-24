@@ -1,0 +1,74 @@
+package e2e:commons;
+
+interface types {
+  // ============ RECORDS ============
+  // Simple record for basic record testing (8 bytes, no padding)
+  record point {
+    x: s32,
+    y: s32,
+  }
+
+  // Nested record with string (tests layout, alignment, string in record)
+  record entity {
+    id: u32,
+    name: string,
+    position: point,
+  }
+
+  // Record with alignment gap (u32 + 4-byte padding + f64 = 16 bytes)
+  // Critical test for canonical ABI alignment rules
+  record measurement {
+    count: u32,
+    value: f64,
+  }
+
+  // Tuple-like record (3 mixed-type fields with f64 alignment gap)
+  // a: u8, padding(7), b: f64, c: u32, padding(4) = 24 bytes
+  record tuple-like {
+    a: u8,
+    b: f64,
+    c: u32,
+  }
+
+  // ============ ENUM ============
+  // 3-case enum (tests 1-byte discriminant, 1-byte stride in lists)
+  enum color {
+    red,
+    green,
+    blue,
+  }
+
+  // ============ FLAGS ============
+  // 3-flag bitset (tests bitfield layout)
+  flags permission {
+    read,
+    write,
+    execute,
+  }
+
+  // ============ VARIANTS ============
+  // Variant with small payloads: no-payload case + u8 + u16
+  // Tests union discriminant + variable payload size
+  variant small-value {
+    none,
+    byte(u8),
+    word(u16),
+  }
+
+  // Variant with mixed-flat payloads: s32 vs f32 (both 4 bytes)
+  // Tests union layout when both branches are same size but different types
+  variant mixed-value {
+    int(s32),
+    float(f32),
+  }
+
+  // Variant with many cases and string payload
+  // Tests large discriminant (>2 bits) and large payload handling
+  variant large-enum {
+    case-a,
+    case-b,
+    case-c,
+    case-d,
+    case-e(string),
+  }
+}

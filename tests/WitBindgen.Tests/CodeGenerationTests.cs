@@ -645,7 +645,9 @@ interface types {
         // Class structure
         Assert.Contains("public class Blob : global::System.IDisposable", code);
         Assert.Contains("internal int Handle { get; }", code);
-        Assert.Contains("internal Blob(int handle)", code);
+        Assert.Contains("internal Blob(int handle, bool owned = true)", code);
+        Assert.Contains("private readonly bool _owned;", code);
+        Assert.Contains("private bool _dropped;", code);
 
         // Constructor
         Assert.Contains("public unsafe Blob(", code);
@@ -661,9 +663,18 @@ interface types {
         Assert.Contains("public static unsafe Blob Merge(", code);
         Assert.Contains("[static]blob.merge", code);
 
-        // Dispose
+        // Static merge takes borrow params, now typed BlobBorrow
+        Assert.Contains("BlobBorrow", code);
+
+        // Guarded Dispose
         Assert.Contains("public void Dispose()", code);
+        Assert.Contains("if (_owned && !_dropped)", code);
+        Assert.Contains("_dropped = true;", code);
         Assert.Contains("[resource-drop]blob", code);
+
+        // Borrow struct + implicit operator
+        Assert.Contains("public readonly struct BlobBorrow", code);
+        Assert.Contains("public static implicit operator BlobBorrow(Blob owned)", code);
     }
 
     [Fact]
@@ -850,19 +861,163 @@ interface ecs {
 
         Assert.Contains("public class System : global::System.IDisposable", code);
         Assert.Contains("internal int Handle { get; }", code);
-        Assert.Contains("internal System(int handle)", code);
+        Assert.Contains("internal System(int handle, bool owned = true)", code);
 
         // Constructor
         Assert.Contains("[constructor]system", code);
 
-        // Instance methods with borrow params
+        // Instance methods now take the borrow struct SystemBorrow
         Assert.Contains("[method]system.after", code);
         Assert.Contains("[method]system.before", code);
-        Assert.Contains("public unsafe void After(", code);
-        Assert.Contains("public unsafe void Before(", code);
+        Assert.Contains("public unsafe void After(SystemBorrow", code);
+        Assert.Contains("public unsafe void Before(SystemBorrow", code);
 
-        // Dispose
+        // Guarded Dispose
         Assert.Contains("[resource-drop]system", code);
+        Assert.Contains("if (_owned && !_dropped)", code);
+
+        // Borrow struct with same instance methods + implicit operator
+        Assert.Contains("public readonly struct SystemBorrow", code);
+        Assert.Contains("public static implicit operator SystemBorrow(System owned)", code);
+    }
+
+    [Fact]
+    public void GenerateBorrowStructEmitted()
+    {
+        var wit = @"
+package tecs:ecs;
+
+interface ecs {
+    resource system {
+        constructor(name: string);
+        after: func(other: borrow<system>);
+        before: func(other: borrow<system>);
+    }
+}
+";
+        var directory = Wit.Parse(wit);
+        var interf = directory.Packages.Values.First().Versions.Values.First()
+            .Definitions.Items[0] as WitInterface;
+        var resource = interf!.Definitions.Items[0] as WitResource;
+
+        var sb = new IndentedStringBuilder();
+        GuestImportWriter.WriteImportResource(sb, "tecs:ecs/ecs", resource!);
+        var code = sb.ToString();
+
+        // The readonly struct is emitted with a Handle property and an internal ctor.
+        Assert.Contains("public readonly struct SystemBorrow", code);
+
+        // Borrow exposes the same instance methods as the class (After/Before),
+        // and the struct version routes through the class's WasmImports.
+        Assert.Contains("System.WasmImports.After", code);
+        Assert.Contains("System.WasmImports.Before", code);
+
+        // Borrow has NO Dispose and NO constructor from the WIT constructor.
+        // (Only the internal handle ctor.) The struct body must not contain a public Blob-style ctor.
+        Assert.Contains("internal SystemBorrow(int handle)", code);
+    }
+
+    [Fact]
+    public void GenerateBorrowImplicitOperator()
+    {
+        var wit = @"
+package tecs:ecs;
+
+interface ecs {
+    resource system {
+        constructor(name: string);
+        after: func(other: borrow<system>);
+    }
+}
+";
+        var directory = Wit.Parse(wit);
+        var interf = directory.Packages.Values.First().Versions.Values.First()
+            .Definitions.Items[0] as WitInterface;
+        var resource = interf!.Definitions.Items[0] as WitResource;
+
+        var sb = new IndentedStringBuilder();
+        GuestImportWriter.WriteImportResource(sb, "tecs:ecs/ecs", resource!);
+        var code = sb.ToString();
+
+        Assert.Contains("public static implicit operator SystemBorrow(System owned) => new SystemBorrow(owned.Handle);", code);
+    }
+
+    [Fact]
+    public void GenerateResourceDropGuard()
+    {
+        var wit = @"
+package tecs:ecs;
+
+interface ecs {
+    resource system {
+        constructor(name: string);
+    }
+}
+";
+        var directory = Wit.Parse(wit);
+        var interf = directory.Packages.Values.First().Versions.Values.First()
+            .Definitions.Items[0] as WitInterface;
+        var resource = interf!.Definitions.Items[0] as WitResource;
+
+        var sb = new IndentedStringBuilder();
+        GuestImportWriter.WriteImportResource(sb, "tecs:ecs/ecs", resource!);
+        var code = sb.ToString();
+
+        // Dispose only drops owned, not-yet-dropped handles, and only once.
+        Assert.Contains("public void Dispose()", code);
+        Assert.Contains("if (_owned && !_dropped)", code);
+        Assert.Contains("WasmImports.ResourceDrop(Handle);", code);
+        Assert.Contains("_dropped = true;", code);
+    }
+
+    [Fact]
+    public void GenerateResourceConstructorOwned()
+    {
+        var wit = @"
+package tecs:ecs;
+
+interface ecs {
+    resource system {
+        constructor(name: string);
+    }
+}
+";
+        var directory = Wit.Parse(wit);
+        var interf = directory.Packages.Values.First().Versions.Values.First()
+            .Definitions.Items[0] as WitInterface;
+        var resource = interf!.Definitions.Items[0] as WitResource;
+
+        var sb = new IndentedStringBuilder();
+        GuestImportWriter.WriteImportResource(sb, "tecs:ecs/ecs", resource!);
+        var code = sb.ToString();
+
+        // The internal ctor carries an owned default; the public ctor marks the handle owned.
+        Assert.Contains("internal System(int handle, bool owned = true)", code);
+        Assert.Contains("_owned = true;", code);
+        Assert.Contains("_dropped = false;", code);
+    }
+
+    [Fact]
+    public void BorrowTypeMapsToBorrowSuffix()
+    {
+        var wit = @"
+package tecs:ecs;
+
+interface ecs {
+    resource system {
+        after: func(other: borrow<system>);
+    }
+}
+";
+        var directory = Wit.Parse(wit);
+        var interf = directory.Packages.Values.First().Versions.Values.First()
+            .Definitions.Items[0] as WitInterface;
+        var resource = interf!.Definitions.Items[0] as WitResource;
+        var afterFunc = resource!.Methods[0].Type as WitFuncType;
+        var borrowParamType = afterFunc!.Parameters[0].Type;
+
+        // borrow<system> maps to "SystemBorrow", not "System".
+        Assert.Equal("SystemBorrow", CanonicalAbi.WitTypeToCS(borrowParamType));
     }
 
     [Fact]
@@ -1115,6 +1270,17 @@ interface ecs {
         Assert.Contains("public class App : global::System.IDisposable", generatedCode);
         Assert.Contains("public class Commands : global::System.IDisposable", generatedCode);
         Assert.Contains("public class Query : global::System.IDisposable", generatedCode);
+
+        // Regression (own/borrow split): borrow structs emitted, ownership-guarded Dispose,
+        // owned resource results constructed as owned, borrow<T> method params use the struct.
+        Assert.Contains("public readonly struct SystemBorrow", generatedCode);
+        Assert.Contains("if (_owned && !_dropped)", generatedCode);
+        Assert.Contains("new EntityCommands(rawResult, owned: true)", generatedCode);
+        Assert.Contains("After(SystemBorrow other)", generatedCode);
+
+        // Generated resource/borrow code must be syntactically valid.
+        foreach (var tree in result.GeneratedTrees)
+            Assert.Empty(tree.GetDiagnostics().Where(d => d.Severity == DiagnosticSeverity.Error));
     }
 
     [Fact]
@@ -1245,6 +1411,23 @@ world guest {
         Assert.Contains("UnmanagedCallersOnly", generatedCode);
         Assert.Contains("setup", generatedCode);
         Assert.Contains("run-system", generatedCode);
+
+        // Regression (own/borrow split lift sites — the bulk of the change):
+        // borrow<query> params become the borrow struct, cross-package name stays qualified.
+        Assert.Contains("QueryBorrow q, byte index", generatedCode);
+        // list<borrow<system>> -> SystemBorrow[]
+        Assert.Contains("SystemBorrow[] systems", generatedCode);
+        // own<T> export param (setup(app)) lifts as an OWNED resource (Dispose will drop it).
+        Assert.Contains("new global::Wit.Tecs.Ecs.Ecs.App(app, owned: true)", generatedCode);
+        // option<query> (own) lifts the inner resource as owned.
+        Assert.Contains("new global::Wit.Tecs.Ecs.Ecs.Query(query_1, owned: true)", generatedCode);
+        // Borrow struct + implicit owned->borrow conversion emitted.
+        Assert.Contains("public readonly struct QueryBorrow", generatedCode);
+        Assert.Contains("implicit operator QueryBorrow(Query owned)", generatedCode);
+
+        // Generated cross-package resource/borrow code must be syntactically valid.
+        foreach (var tree in result.GeneratedTrees)
+            Assert.Empty(tree.GetDiagnostics().Where(d => d.Severity == DiagnosticSeverity.Error));
     }
 
     [Fact]
@@ -1326,10 +1509,10 @@ world w {
         var generatedCode = result.GeneratedTrees.Select(t => t.GetText().ToString()).Aggregate("", (a, b) => a + "\n" + b);
 
         // variant: 1-byte discriminant (3 cases -> u8); payload at aligned offset 8 (f64 case forces align 8).
-        Assert.Contains("retVar.Discriminant = (Shape.Case)*(byte*)((byte*)retArea);", generatedCode);
+        Assert.Contains("retVar.Discriminant = (Shape.Case)(*(byte*)((byte*)retArea));", generatedCode);
         Assert.Contains("retVar.CirclePayload = *(double*)((byte*)retArea + 8);", generatedCode);
         // flags element of a tuple result read + cast; nested list read at its aligned offset + freed.
-        Assert.Contains("(Perms)*(int*)((byte*)retArea)", generatedCode);
+        Assert.Contains("(Perms)(*(int*)((byte*)retArea))", generatedCode);
         Assert.Contains("new Span<uint>(retItem2ListPtr, retItem2ListCount).ToArray()", generatedCode);
         Assert.Contains("InteropHelpers.Free(retItem2ListPtr", generatedCode);
 

@@ -1,0 +1,85 @@
+package e2e:test;
+
+interface test-types {
+  use e2e:commons/types.{
+    point,
+    entity,
+    measurement,
+    tuple-like,
+    color,
+    permission,
+    small-value,
+    mixed-value,
+    large-enum
+  };
+
+  // ============ PRIMITIVE TYPES (12) ============
+  echo-bool: func(value: bool) -> bool;
+
+  echo-u8: func(value: u8) -> u8;
+  echo-u16: func(value: u16) -> u16;
+  echo-u32: func(value: u32) -> u32;
+  echo-u64: func(value: u64) -> u64;
+
+  echo-s8: func(value: s8) -> s8;
+  echo-s16: func(value: s16) -> s16;
+  echo-s32: func(value: s32) -> s32;
+  echo-s64: func(value: s64) -> s64;
+
+  echo-f32: func(value: f32) -> f32;
+  echo-f64: func(value: f64) -> f64;
+
+  // ============ STRING (2) ============
+  echo-string: func(value: string) -> string;
+  uppercase: func(text: string) -> string;
+
+  // ============ LISTS ============
+  echo-list-string: func(values: list<string>) -> list<string>;
+  // Primitive lists: regression for the export-param use-after-free (zero-copy span freed
+  // before the user impl read it).
+  echo-list-u8: func(values: list<u8>) -> list<u8>;
+  echo-list-u32: func(values: list<u32>) -> list<u32>;
+  echo-list-f64: func(values: list<f64>) -> list<f64>;
+  // list<enum>: regression for the cast-vs-multiply lift `(Color)(*(byte*)p)`.
+  echo-list-color: func(values: list<color>) -> list<color>;
+
+  // ============ RECORDS (4) ============
+  echo-point: func(p: point) -> point;
+  echo-measurement: func(m: measurement) -> measurement;
+  echo-tuple-like: func(t: tuple-like) -> tuple-like;
+  echo-entity: func(e: entity) -> entity;
+
+  // ============ OPTION (3) ============
+  echo-option-u32: func(value: option<u32>) -> option<u32>;
+  echo-option-point: func(value: option<point>) -> option<point>;
+  echo-option-color: func(value: option<color>) -> option<color>;
+
+  // ============ ENUM (2) ============
+  echo-color: func(c: color) -> color;
+  color-name: func(c: color) -> string;
+
+  // ============ CHAR + FLAGS ============
+  // char maps to uint; flags maps to a typed [Flags] enum — both need explicit casts in
+  // lift/lower (regression for the missing-cast bug).
+  echo-char: func(value: char) -> char;
+  echo-permission: func(value: permission) -> permission;
+
+  // ============ VARIANT (return-position constructors + projections) ============
+  // Variant returns exercise canonical-ABI lowering for small-align,
+  // mixed-flat, and many-case-with-string variants.
+  make-small-none: func() -> small-value;
+  make-small-byte: func(v: u8) -> small-value;
+  make-small-word: func(v: u16) -> small-value;
+
+  make-mixed-int: func(v: s32) -> mixed-value;
+  make-mixed-float: func(v: f32) -> mixed-value;
+
+  // large-enum has a string-payload case: exercises a heap-bearing variant return and the
+  // variant post-return free path (another cast-vs-multiply site).
+  make-large-empty: func() -> large-enum;
+  make-large-tagged: func(s: string) -> large-enum;
+}
+
+world e2e-test {
+  export test-types;
+}

@@ -5,6 +5,8 @@
         <LangVersion>preview</LangVersion>
         <Nullable>enable</Nullable>
         <ImplicitUsings>enable</ImplicitUsings>
+        <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+        <EmitCompilerGeneratedFiles>true</EmitCompilerGeneratedFiles>
         <IsPackable>false</IsPackable>
     </PropertyGroup>
 
@@ -18,17 +20,21 @@
     </ItemGroup>
 
     <ItemGroup>
-        <ProjectReference Include="..\..\src\WitBindgen.SourceGenerator\WitBindgen.SourceGenerator.csproj">
-            <PrivateAssets>none</PrivateAssets>
-        </ProjectReference>
-        <!-- Referenced so the semantic-compile gate (SemanticCompileTests) can resolve the
-             WitBindgen.Runtime.* types the generator emits into a real compilation. -->
-        <ProjectReference Include="..\..\src\WitBindgen.Runtime\WitBindgen.Runtime.csproj" />
+        <ProjectReference Include="..\..\..\external\wasmtime-dotnet\src\Wasmtime\Wasmtime.csproj" />
+        <ProjectReference Include="..\..\..\external\wasmtime-dotnet\src\Wasmtime.SourceGenerator\Wasmtime.SourceGenerator.csproj"
+                          OutputItemType="Analyzer"
+                          ReferenceOutputAssembly="false" />
     </ItemGroup>
 
     <ItemGroup>
-        <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.7.0" />
-        <PackageReference Include="Antlr4.Runtime.Standard" Version="4.13.1" />
+        <AdditionalFiles Include="..\wit\deps\e2e-commons\commons.wit" />
+        <AdditionalFiles Include="..\wit\e2e-test.wit" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <None Update="*.wasm">
+            <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+        </None>
     </ItemGroup>
 
 </Project>

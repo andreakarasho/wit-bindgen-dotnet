@@ -114,35 +114,47 @@ public static class GuestExportWriter
                 LiftParam(sb, param, coreParams, liftedArgs);
             }
 
-            // Free WASM memory for lifted string/list parameters (callee owns the memory per canonical ABI)
-            foreach (var param in func.Parameters)
-            {
-                switch (param.Type.Kind)
-                {
-                    case WitTypeKind.String:
-                        sb.AppendLine($"WitBindgen.Runtime.InteropHelpers.Free((byte*){param.CSharpVariableName}_0, {param.CSharpVariableName}_1, 1);");
-                        break;
-                    case WitTypeKind.List when param.Type is WitListType listType:
-                        var elemSize = CanonicalAbi.MemorySize(listType.ElementType);
-                        var elemAlign = CanonicalAbi.MemoryAlign(listType.ElementType);
-                        sb.AppendLine($"WitBindgen.Runtime.InteropHelpers.Free((byte*){param.CSharpVariableName}_0, {param.CSharpVariableName}_1 * {elemSize}, {elemAlign});");
-                        break;
-                }
-            }
-
-            // Call the user's implementation
+            // Call the user's implementation, THEN free the WASM memory backing string/list
+            // params (the callee owns it per the canonical ABI). The free must come after the
+            // call: blittable-primitive list params are lifted as a zero-copy ReadOnlySpan<T>
+            // over this very memory (see LiftParam), so freeing before the user reads the span
+            // is a use-after-free that returns garbage.
             var callArgs = string.Join(", ", liftedArgs);
             if (func.Results.Length == 0)
             {
                 sb.AppendLine($"{csharpFuncName}({callArgs});");
+                WriteParamFree(sb, func);
             }
             else
             {
                 sb.AppendLine($"var result = {csharpFuncName}({callArgs});");
+                WriteParamFree(sb, func);
 
                 // Lower the result
                 var resultType = func.Results[0];
                 LowerResult(sb, resultType, useRetPtr);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Frees the WASM linear memory backing string/list export params. Emitted after the user
+    /// call so zero-copy span lifts stay valid for the duration of the call.
+    /// </summary>
+    private static void WriteParamFree(IndentedStringBuilder sb, WitFuncType func)
+    {
+        foreach (var param in func.Parameters)
+        {
+            switch (param.Type.Kind)
+            {
+                case WitTypeKind.String:
+                    sb.AppendLine($"WitBindgen.Runtime.InteropHelpers.Free((byte*){param.CSharpVariableName}_0, {param.CSharpVariableName}_1, 1);");
+                    break;
+                case WitTypeKind.List when param.Type is WitListType listType:
+                    var elemSize = CanonicalAbi.MemorySize(listType.ElementType);
+                    var elemAlign = CanonicalAbi.MemoryAlign(listType.ElementType);
+                    sb.AppendLine($"WitBindgen.Runtime.InteropHelpers.Free((byte*){param.CSharpVariableName}_0, {param.CSharpVariableName}_1 * {elemSize}, {elemAlign});");
+                    break;
             }
         }
     }
@@ -190,8 +202,16 @@ public static class GuestExportWriter
                 break;
 
             case WitTypeKind.S32:
-            case WitTypeKind.Char:
                 liftedArgs.Add(param.CSharpVariableName);
+                break;
+
+            case WitTypeKind.Char:
+                // High-level char maps to uint; the core param is int.
+                liftedArgs.Add($"(uint){param.CSharpVariableName}");
+                break;
+
+            case WitTypeKind.Flags:
+                liftedArgs.Add($"({CanonicalAbi.WitTypeToCS(resolvedType)}){param.CSharpVariableName}");
                 break;
 
             case WitTypeKind.U64:
@@ -250,9 +270,9 @@ public static class GuestExportWriter
             case WitTypeKind.Resource:
             case WitTypeKind.Borrow:
             {
-                var csType = CanonicalAbi.WitTypeToCS(param.Type);
                 var liftedResVar = $"{param.CSharpVariableName}Res";
-                sb.AppendLine($"var {liftedResVar} = new {csType}({param.CSharpVariableName});");
+                // Pass the unresolved param.Type so cross-package resource names stay qualified.
+                sb.AppendLine($"var {liftedResVar} = {GetResourceConstructorCall(param.Type, param.CSharpVariableName)};");
                 liftedArgs.Add(liftedResVar);
                 break;
             }
@@ -276,7 +296,8 @@ public static class GuestExportWriter
                     if (innerType.Kind == WitTypeKind.Resource || innerType.Kind == WitTypeKind.Borrow)
                     {
                         var handleVar = $"{param.CSharpVariableName}_1";
-                        sb.AppendLine($"{origInnerCsType}? {optVar} = {discVar} != 0 ? new {origInnerCsType}({handleVar}) : null;");
+                        // Use the unresolved element type so cross-package resource names stay qualified.
+                        sb.AppendLine($"{origInnerCsType}? {optVar} = {discVar} != 0 ? {GetResourceConstructorCall(optionType.ElementType, handleVar)} : null;");
                     }
                     else if (innerType.Kind == WitTypeKind.String)
                     {
@@ -367,6 +388,44 @@ public static class GuestExportWriter
                 }
                 break;
 
+            case WitTypeKind.Variant:
+                if (resolvedType is WitVariantType variantParamType)
+                {
+                    if (CanonicalAbi.FlatCount(resolvedType) == 1)
+                    {
+                        // Payloadless variant flattens to a single core slot -> the param is unsuffixed.
+                        var csN = CanonicalAbi.WitTypeToCS(resolvedType);
+                        var vv = $"{param.CSharpVariableName}Var";
+                        sb.AppendLine($"{csN} {vv} = default;");
+                        sb.AppendLine($"{vv}.Discriminant = ({csN}.Case){param.CSharpVariableName};");
+                        liftedArgs.Add(vv);
+                    }
+                    else
+                    {
+                        int vSlot = 0;
+                        var expr = LiftVariantFromFlatParams(sb, variantParamType, param.CSharpVariableName, ref vSlot, param.CSharpVariableName);
+                        liftedArgs.Add(expr);
+                    }
+                }
+                break;
+
+            case WitTypeKind.Result:
+                if (CanonicalAbi.FlatCount(resolvedType) == 1)
+                {
+                    // Payloadless result (bare `result`) flattens to a single core slot.
+                    var csR = CanonicalAbi.WitTypeToCS(resolvedType);
+                    var rv = $"{param.CSharpVariableName}Res";
+                    sb.AppendLine($"{csR} {rv} = {param.CSharpVariableName} == 0 ? {csR}.FromOk(default) : {csR}.FromErr(default);");
+                    liftedArgs.Add(rv);
+                }
+                else
+                {
+                    int rSlot = 0;
+                    var expr = LiftResultFromFlatParams(sb, resolvedType, param.CSharpVariableName, ref rSlot, param.CSharpVariableName);
+                    liftedArgs.Add(expr);
+                }
+                break;
+
             default:
                 liftedArgs.Add(param.CSharpVariableName);
                 break;
@@ -388,12 +447,13 @@ public static class GuestExportWriter
             WitTypeKind.U32 => $"(uint){paramName}",
             WitTypeKind.S8 => $"(sbyte){paramName}",
             WitTypeKind.S16 => $"(short){paramName}",
-            WitTypeKind.S32 or WitTypeKind.Char => paramName,
+            WitTypeKind.S32 => paramName,
+            WitTypeKind.Char => $"(uint){paramName}",
             WitTypeKind.U64 => $"(ulong){paramName}",
             WitTypeKind.S64 => paramName,
             WitTypeKind.F32 or WitTypeKind.F64 => paramName,
-            WitTypeKind.Enum => $"({CanonicalAbi.WitTypeToCS(type)}){paramName}",
-            WitTypeKind.Resource or WitTypeKind.Borrow => $"new {CanonicalAbi.WitTypeToCS(type)}({paramName})",
+            WitTypeKind.Enum or WitTypeKind.Flags => $"({CanonicalAbi.WitTypeToCS(type)}){paramName}",
+            WitTypeKind.Resource or WitTypeKind.Borrow => GetResourceConstructorCall(type, paramName),
             _ => paramName,
         };
     }
@@ -421,8 +481,9 @@ public static class GuestExportWriter
             case WitTypeKind.S16:
                 return $"(short){prefix}_{slotIdx++}";
             case WitTypeKind.S32:
-            case WitTypeKind.Char:
                 return $"{prefix}_{slotIdx++}";
+            case WitTypeKind.Char:
+                return $"(uint){prefix}_{slotIdx++}";
             case WitTypeKind.U64:
                 return $"(ulong){prefix}_{slotIdx++}";
             case WitTypeKind.S64:
@@ -431,10 +492,11 @@ public static class GuestExportWriter
             case WitTypeKind.F64:
                 return $"{prefix}_{slotIdx++}";
             case WitTypeKind.Enum:
+            case WitTypeKind.Flags:
                 return $"({CanonicalAbi.WitTypeToCS(type)}){prefix}_{slotIdx++}";
             case WitTypeKind.Resource:
             case WitTypeKind.Borrow:
-                return $"new {CanonicalAbi.WitTypeToCS(type)}({prefix}_{slotIdx++})";
+                return GetResourceConstructorCall(type, $"{prefix}_{slotIdx++}");
 
             case WitTypeKind.String:
             {
@@ -473,9 +535,109 @@ public static class GuestExportWriter
                 }
                 return "default";
 
+            case WitTypeKind.Variant:
+                if (type is WitVariantType varParamLift)
+                    return LiftVariantFromFlatParams(sb, varParamLift, prefix, ref slotIdx, varPrefix);
+                return "default";
+
+            case WitTypeKind.Result:
+                return LiftResultFromFlatParams(sb, type, prefix, ref slotIdx, varPrefix);
+
             default:
                 return $"{prefix}_{slotIdx++}";
         }
+    }
+
+    /// <summary>
+    /// Lifts a result from flat export params: discriminant (0=ok, 1=err) in the first slot, the
+    /// active arm's payload from the joined payload slots. Mirrors <see cref="LiftVariantFromFlatParams"/>.
+    /// </summary>
+    private static string LiftResultFromFlatParams(
+        IndentedStringBuilder sb, WitType type, string prefix, ref int slotIdx, string varPrefix)
+    {
+        var (okT, errT) = CanonicalAbi.ResultArms(type);
+        var csType = CanonicalAbi.WitTypeToCS(type);
+        var rVar = $"{varPrefix}Res";
+        var discSlot = slotIdx++;
+        var payloadStart = slotIdx;
+        var totalPayload = CanonicalAbi.FlatCount(type) - 1;
+
+        sb.AppendLine($"{csType} {rVar};");
+        sb.AppendLine($"if ({prefix}_{discSlot} == 0)");
+        using (sb.Block())
+        {
+            if (okT is not null)
+            {
+                var s = payloadStart;
+                var okExpr = WriteLiftFromFlatParams(sb, okT, prefix, ref s, $"{varPrefix}Ok");
+                sb.AppendLine($"{rVar} = {csType}.FromOk({okExpr});");
+            }
+            else
+            {
+                sb.AppendLine($"{rVar} = {csType}.FromOk(default);");
+            }
+        }
+        sb.AppendLine("else");
+        using (sb.Block())
+        {
+            if (errT is not null)
+            {
+                var s = payloadStart;
+                var errExpr = WriteLiftFromFlatParams(sb, errT, prefix, ref s, $"{varPrefix}Err");
+                sb.AppendLine($"{rVar} = {csType}.FromErr({errExpr});");
+            }
+            else
+            {
+                sb.AppendLine($"{rVar} = {csType}.FromErr(default);");
+            }
+        }
+
+        slotIdx = payloadStart + totalPayload;
+        return rVar;
+    }
+
+    /// <summary>
+    /// Lifts a variant from flat export params: the discriminant occupies the first slot, the
+    /// payload the next (FlatCount-1) slots (a per-position join across all cases). Each case
+    /// reads its own payload from the start of the payload slots (the cases overlap in the union),
+    /// and slotIdx is advanced past the full payload width afterwards. Mirrors the variant
+    /// lowering in GuestImportWriter.WriteLowerFlat.
+    /// ponytail: payloads whose natural core type differs from the joined slot type by float-vs-int
+    /// width (e.g. a variant mixing f64 and i64 cases) are not bit-reinterpreted here — the same
+    /// gap exists on the lower side; add BitConverter coercion if such a variant param appears.
+    /// </summary>
+    private static string LiftVariantFromFlatParams(
+        IndentedStringBuilder sb, WitVariantType variant, string prefix, ref int slotIdx, string varPrefix)
+    {
+        var csName = CanonicalAbi.WitTypeToCS(variant);
+        var vVar = $"{varPrefix}Var";
+        var discSlot = slotIdx++;
+        sb.AppendLine($"{csName} {vVar} = default;");
+        sb.AppendLine($"{vVar}.Discriminant = ({csName}.Case){prefix}_{discSlot};");
+
+        var payloadSlotStart = slotIdx;
+        var totalPayloadSlots = CanonicalAbi.FlatCount(variant) - 1;
+
+        sb.AppendLine($"switch ({vVar}.Discriminant)");
+        using (sb.Block())
+        {
+            foreach (var c in variant.Values)
+            {
+                if (c.Type is null)
+                    continue;
+                var caseName = StringUtils.GetName(c.Name);
+                sb.AppendLine($"case {csName}.Case.{caseName}:");
+                sb.IncrementIndent();
+                var caseSlot = payloadSlotStart;
+                var payloadExpr = WriteLiftFromFlatParams(sb, c.Type, prefix, ref caseSlot, $"{varPrefix}{caseName}");
+                sb.AppendLine($"{vVar}.{caseName}Payload = {payloadExpr};");
+                sb.AppendLine("break;");
+                sb.DecrementIndent();
+            }
+        }
+
+        slotIdx = payloadSlotStart + totalPayloadSlots;
+        return vVar;
     }
 
     private static void LowerResult(IndentedStringBuilder sb, WitType resultType, bool useRetPtr)
@@ -495,6 +657,7 @@ public static class GuestExportWriter
             case WitTypeKind.S32:
             case WitTypeKind.Char:
             case WitTypeKind.Enum:
+            case WitTypeKind.Flags:
                 sb.AppendLine("return (int)result;");
                 break;
 
@@ -548,6 +711,14 @@ public static class GuestExportWriter
             case WitTypeKind.Resource:
             case WitTypeKind.Borrow:
                 sb.AppendLine("return result.Handle;");
+                break;
+
+            case WitTypeKind.Result:
+                // Payload-bearing results flatten to >1 core value -> the aggregate retptr path
+                // (default) stores them in memory. A bare `result` is a single discriminant slot.
+                if (useRetPtr)
+                    goto default;
+                sb.AppendLine("return (int)(result.IsOk ? 0 : 1);");
                 break;
 
             default:
@@ -617,12 +788,12 @@ public static class GuestExportWriter
             case WitTypeKind.Enum:
             {
                 var enumKw = CanonicalAbi.IntStoreKeyword(CanonicalAbi.EnumSizeOf(elemType));
-                sb.AppendLine($"{listVar}[{idxVar}] = ({CanonicalAbi.WitTypeToCS(elemType)})*({enumKw}*){baseVar};");
+                sb.AppendLine($"{listVar}[{idxVar}] = ({CanonicalAbi.WitTypeToCS(elemType)})(*({enumKw}*){baseVar});");
                 break;
             }
             case WitTypeKind.Resource:
             case WitTypeKind.Borrow:
-                sb.AppendLine($"{listVar}[{idxVar}] = new {CanonicalAbi.WitTypeToCS(elemType)}(*(int*){baseVar});");
+                sb.AppendLine($"{listVar}[{idxVar}] = {GetResourceConstructorCall(elemType, $"*(int*){baseVar}")};");
                 break;
             case WitTypeKind.Record:
                 if (elemType is WitRecordType liftRecType)
@@ -872,6 +1043,32 @@ public static class GuestExportWriter
                     }
                 }
                 break;
+            case WitTypeKind.Result:
+                if (true)
+                {
+                    var (okT, errT) = CanonicalAbi.ResultArms(type);
+                    var payOff = offset + CanonicalAbi.ResultPayloadOffset(type);
+                    sb.AppendLine($"*(byte*)({offsetExpr}) = (byte)({expr}.IsOk ? 0 : 1);");
+                    if (okT is not null)
+                    {
+                        sb.AppendLine($"if ({expr}.IsOk)");
+                        using (sb.Block())
+                            WriteMemoryStore(sb, okT, $"{expr}.Ok", baseVar, payOff);
+                        if (errT is not null)
+                        {
+                            sb.AppendLine("else");
+                            using (sb.Block())
+                                WriteMemoryStore(sb, errT, $"{expr}.Err", baseVar, payOff);
+                        }
+                    }
+                    else if (errT is not null)
+                    {
+                        sb.AppendLine($"if (!{expr}.IsOk)");
+                        using (sb.Block())
+                            WriteMemoryStore(sb, errT, $"{expr}.Err", baseVar, payOff);
+                    }
+                }
+                break;
             case WitTypeKind.List:
                 if (type is WitListType listStoreType)
                 {
@@ -921,8 +1118,11 @@ public static class GuestExportWriter
             case WitTypeKind.Enum:
             {
                 var enumKw = CanonicalAbi.IntStoreKeyword(CanonicalAbi.EnumSizeOf(type));
-                return $"({CanonicalAbi.WitTypeToCS(type)})*({enumKw}*)({offsetExpr})";
+                // Parenthesize the deref: `(Color)*(byte*)p` parses as multiplication (CS0119).
+                return $"({CanonicalAbi.WitTypeToCS(type)})(*({enumKw}*)({offsetExpr}))";
             }
+            case WitTypeKind.Flags:
+                return $"({CanonicalAbi.WitTypeToCS(type)})(*(int*)({offsetExpr}))";
             case WitTypeKind.U64:
                 return $"*(ulong*)({offsetExpr})";
             case WitTypeKind.S64:
@@ -933,7 +1133,7 @@ public static class GuestExportWriter
                 return $"*(double*)({offsetExpr})";
             case WitTypeKind.Resource:
             case WitTypeKind.Borrow:
-                return $"new {CanonicalAbi.WitTypeToCS(type)}(*(int*)({offsetExpr}))";
+                return GetResourceConstructorCall(type, $"*(int*)({offsetExpr})");
             case WitTypeKind.String:
             {
                 var sVar = $"{varPrefix}Str";
@@ -982,6 +1182,22 @@ public static class GuestExportWriter
         }
     }
 
+    /// <summary>
+    /// Builds the C# constructor-call expression that lifts a resource/borrow handle into its
+    /// wrapper. Owned resources (own&lt;T&gt;) construct the class with owned:true so Dispose drops
+    /// the handle; borrows (borrow&lt;T&gt;) construct the readonly struct TBorrow (never dropped).
+    /// </summary>
+    private static string GetResourceConstructorCall(WitType resourceType, string handleExpr)
+    {
+        // WitTypeToCS on the (possibly unresolved) type preserves cross-package qualification,
+        // while the resolved kind decides whether this is an owned class or a borrow struct.
+        var csType = CanonicalAbi.WitTypeToCS(resourceType);
+        var resolvedKind = CanonicalAbi.ResolveType(resourceType).Kind;
+        return resolvedKind == WitTypeKind.Resource
+            ? $"new {csType}({handleExpr}, owned: true)"
+            : $"new {csType}({handleExpr})";
+    }
+
     private static bool NeedsPostReturn(WitType type)
     {
         type = CanonicalAbi.ResolveType(type);
@@ -994,6 +1210,7 @@ public static class GuestExportWriter
             case WitTypeKind.Tuple:
             case WitTypeKind.Option:
             case WitTypeKind.Variant:
+            case WitTypeKind.Result:
                 return true;
             default:
                 return false;
@@ -1011,6 +1228,11 @@ public static class GuestExportWriter
             case WitTypeKind.String:
             case WitTypeKind.List:
                 return true;
+            case WitTypeKind.Result:
+            {
+                var (ok, err) = CanonicalAbi.ResultArms(type);
+                return (ok is not null && ContainsHeap(ok)) || (err is not null && ContainsHeap(err));
+            }
             case WitTypeKind.Record:
                 if (type is WitRecordType rt)
                     foreach (var f in rt.Fields) if (ContainsHeap(f.Type)) return true;
@@ -1097,13 +1319,38 @@ public static class GuestExportWriter
                     using (sb.Block()) { WriteMemoryFree(sb, inner, baseVar, po); }
                 }
                 break;
+            case WitTypeKind.Result:
+                if (type.Kind == WitTypeKind.Result)
+                {
+                    var (okT, errT) = CanonicalAbi.ResultArms(type);
+                    var payOff = offset + CanonicalAbi.ResultPayloadOffset(type);
+                    var okHeap = okT is not null && ContainsHeap(okT);
+                    var errHeap = errT is not null && ContainsHeap(errT);
+                    if (okHeap || errHeap)
+                    {
+                        sb.AppendLine($"if (*(byte*)({offsetExpr}) == 0)");
+                        using (sb.Block())
+                        {
+                            if (okHeap) WriteMemoryFree(sb, okT!, baseVar, payOff);
+                        }
+                        if (errHeap)
+                        {
+                            sb.AppendLine("else");
+                            using (sb.Block())
+                            {
+                                WriteMemoryFree(sb, errT!, baseVar, payOff);
+                            }
+                        }
+                    }
+                }
+                break;
             case WitTypeKind.Variant:
                 if (type is WitVariantType vt)
                 {
                     var po = offset + CanonicalAbi.VariantPayloadOffset(vt);
                     var csName = CanonicalAbi.WitTypeToCS(type);
                     var discKw = CanonicalAbi.IntStoreKeyword(CanonicalAbi.VariantDiscSize(vt));
-                    sb.AppendLine($"switch (({csName}.Case)*({discKw}*)({offsetExpr}))");
+                    sb.AppendLine($"switch (({csName}.Case)(*({discKw}*)({offsetExpr})))");
                     using (sb.Block())
                     {
                         foreach (var c in vt.Values)

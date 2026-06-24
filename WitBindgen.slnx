@@ -8,6 +8,13 @@
     <Project Path="examples/Calculator/Calculator.csproj" />
     <Project Path="examples/CalculatorHost/CalculatorHost.csproj" />
     <Project Path="examples/EcsGuest/EcsGuest.csproj" />
-    <Project Path="examples/EcsHost/EcsHost.csproj" />
+    <!-- EcsHost excluded: it does not compile against the bumped wasmtime-dotnet submodule
+         (host generator moved to an interface-based IQuery/ICommands API). Files kept on disk
+         under examples/EcsHost for a future port. -->
+  </Folder>
+
+  <Folder Name="/tests/e2e/">
+    <Project Path="tests/WitBindgen.E2E/Guest/WitBindgen.E2EGuest.csproj" />
+    <Project Path="tests/WitBindgen.E2E/Host/WitBindgen.E2EHost.csproj" />
   </Folder>
 </Solution>

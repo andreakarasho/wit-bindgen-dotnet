@@ -257,9 +257,9 @@ public static class GuestImportWriter
                 {
                     sb.AppendLine($"return ({CanonicalAbi.WitTypeToCS(resultType)})retArea[0];");
                 }
-                else if (resultType.Kind == WitTypeKind.Resource || resultType.Kind == WitTypeKind.User)
+                else if (resultType.Kind == WitTypeKind.Resource || resultType.Kind == WitTypeKind.Borrow)
                 {
-                    sb.AppendLine($"return new {CanonicalAbi.WitTypeToCS(resultType)}(retArea[0]);");
+                    sb.AppendLine($"return {GetResourceConstructorCall(resultType, "retArea[0]")};");
                 }
                 else
                 {
@@ -270,6 +270,22 @@ public static class GuestImportWriter
                 }
             }
         }
+    }
+
+    /// <summary>
+    /// Builds the C# constructor-call expression that lifts a resource/borrow handle into its
+    /// wrapper. Owned resources (own&lt;T&gt;) construct the class with owned:true so Dispose drops
+    /// the handle; borrows (borrow&lt;T&gt;) construct the readonly struct TBorrow (never dropped).
+    /// </summary>
+    private static string GetResourceConstructorCall(WitType resourceType, string handleExpr)
+    {
+        // WitTypeToCS on the (possibly unresolved) type preserves cross-package qualification,
+        // while the resolved kind decides whether this is an owned class or a borrow struct.
+        var csType = CanonicalAbi.WitTypeToCS(resourceType);
+        var resolvedKind = CanonicalAbi.ResolveType(resourceType).Kind;
+        return resolvedKind == WitTypeKind.Resource
+            ? $"new {csType}({handleExpr}, owned: true)"
+            : $"new {csType}({handleExpr})";
     }
 
     private static void WriteLowerParam(IndentedStringBuilder sb, WitFuncParameter param, List<string> callArgs)
@@ -291,6 +307,7 @@ public static class GuestImportWriter
             case WitTypeKind.S32:
             case WitTypeKind.Char:
             case WitTypeKind.Enum:
+            case WitTypeKind.Flags:
                 callArgs.Add($"(int){varName}");
                 break;
 
@@ -492,10 +509,73 @@ public static class GuestImportWriter
                 }
                 break;
 
+            case WitTypeKind.Result:
+                WriteLowerResultFlat(sb, type, varName, callArgs);
+                break;
+
             default:
                 callArgs.Add(varName);
                 break;
         }
+    }
+
+    /// <summary>
+    /// Lowers a result into flat call args: discriminant (0=ok, 1=err) then the joined payload
+    /// slots, filled from whichever arm is active. Mirrors the variant lowering structure.
+    /// </summary>
+    private static void WriteLowerResultFlat(IndentedStringBuilder sb, WitType type, string expr, List<string> callArgs)
+    {
+        var (okT, errT) = CanonicalAbi.ResultArms(type);
+        callArgs.Add($"(int)({expr}.IsOk ? 0 : 1)");
+
+        var payloadFlatCount = CanonicalAbi.FlatCount(type) - 1;
+        if (payloadFlatCount <= 0)
+            return;
+
+        var payloadFlat = CanonicalAbi.Flatten(type);
+        var uid = expr.Replace(".", "_").Replace("[", "_").Replace("]", "");
+        var tempVars = new List<string>();
+        for (int i = 0; i < payloadFlatCount; i++)
+        {
+            var tempType = CanonicalAbi.CoreTypeToCS(payloadFlat[i + 1]);
+            var tempName = $"{uid}_rp{i}";
+            sb.AppendLine($"{tempType} {tempName} = 0;");
+            tempVars.Add(tempName);
+        }
+
+        void EmitArm(string condition, WitType armType, string accessor)
+        {
+            sb.AppendLine(condition);
+            using (sb.Block())
+            {
+                var armArgs = new List<string>();
+                WriteLowerFlat(sb, armType, accessor, armArgs);
+                for (int i = 0; i < armArgs.Count && i < tempVars.Count; i++)
+                    sb.AppendLine($"{tempVars[i]} = {armArgs[i]};");
+            }
+        }
+
+        if (okT is not null)
+        {
+            EmitArm($"if ({expr}.IsOk)", okT, $"{expr}.Ok");
+            if (errT is not null)
+            {
+                sb.AppendLine("else");
+                using (sb.Block())
+                {
+                    var armArgs = new List<string>();
+                    WriteLowerFlat(sb, errT, $"{expr}.Err", armArgs);
+                    for (int i = 0; i < armArgs.Count && i < tempVars.Count; i++)
+                        sb.AppendLine($"{tempVars[i]} = {armArgs[i]};");
+                }
+            }
+        }
+        else if (errT is not null)
+        {
+            EmitArm($"if (!{expr}.IsOk)", errT, $"{expr}.Err");
+        }
+
+        callArgs.AddRange(tempVars);
     }
 
     private static void WriteLowerFlat(IndentedStringBuilder sb, WitType type, string expr, List<string> callArgs)
@@ -515,6 +595,7 @@ public static class GuestImportWriter
             case WitTypeKind.S32:
             case WitTypeKind.Char:
             case WitTypeKind.Enum:
+            case WitTypeKind.Flags:
                 callArgs.Add($"(int){expr}");
                 break;
 
@@ -617,6 +698,10 @@ public static class GuestImportWriter
                         }
                     }
                 }
+                break;
+
+            case WitTypeKind.Result:
+                WriteLowerResultFlat(sb, type, expr, callArgs);
                 break;
 
             default:
@@ -845,7 +930,9 @@ public static class GuestImportWriter
             case WitTypeKind.Enum:
             {
                 var enumKw = CanonicalAbi.IntStoreKeyword(CanonicalAbi.EnumSizeOf(type));
-                return $"({CanonicalAbi.WitTypeToCS(type)})*({enumKw}*)({offsetExpr})";
+                // Parenthesize the deref: `(Color)*(byte*)p` parses as multiplication (CS0119);
+                // `(Color)(*(byte*)p)` is the cast we mean.
+                return $"({CanonicalAbi.WitTypeToCS(type)})(*({enumKw}*)({offsetExpr}))";
             }
             case WitTypeKind.U64:
                 return $"*(ulong*)({offsetExpr})";
@@ -857,7 +944,7 @@ public static class GuestImportWriter
                 return $"*(double*)({offsetExpr})";
             case WitTypeKind.Resource:
             case WitTypeKind.Borrow:
-                return $"new {CanonicalAbi.WitTypeToCS(type)}(*(int*)({offsetExpr}))";
+                return GetResourceConstructorCall(type, $"*(int*)({offsetExpr})");
             case WitTypeKind.String:
             {
                 var sVar = $"{varPrefix}Str";
@@ -902,7 +989,7 @@ public static class GuestImportWriter
                 }
                 return "default";
             case WitTypeKind.Flags:
-                return $"({CanonicalAbi.WitTypeToCS(type)})*(int*)({offsetExpr})";
+                return $"({CanonicalAbi.WitTypeToCS(type)})(*(int*)({offsetExpr}))";
             case WitTypeKind.Option:
                 if (type is WitOptionType optLoadType)
                 {
@@ -932,7 +1019,7 @@ public static class GuestImportWriter
                     var varVar = $"{varPrefix}Var";
                     sb.AppendLine($"{csName} {varVar} = default;");
                     var discKw = CanonicalAbi.IntStoreKeyword(CanonicalAbi.VariantDiscSize(varLoadType));
-                    sb.AppendLine($"{varVar}.Discriminant = ({csName}.Case)*({discKw}*)({offsetExpr});");
+                    sb.AppendLine($"{varVar}.Discriminant = ({csName}.Case)(*({discKw}*)({offsetExpr}));");
                     var payloadOffset = offset + CanonicalAbi.VariantPayloadOffset(varLoadType);
                     sb.AppendLine($"switch ({varVar}.Discriminant)");
                     using (sb.Block())
@@ -954,6 +1041,41 @@ public static class GuestImportWriter
                     return varVar;
                 }
                 return "default";
+            case WitTypeKind.Result:
+            {
+                var (okT, errT) = CanonicalAbi.ResultArms(type);
+                var csType = CanonicalAbi.WitTypeToCS(type);
+                var payOff = offset + CanonicalAbi.ResultPayloadOffset(type);
+                var rVar = $"{varPrefix}Res";
+                sb.AppendLine($"{csType} {rVar};");
+                sb.AppendLine($"if (*(byte*)({offsetExpr}) == 0)");
+                using (sb.Block())
+                {
+                    if (okT is not null)
+                    {
+                        var okExpr = WriteMemoryLoad(sb, okT, baseVar, payOff, $"{varPrefix}Ok");
+                        sb.AppendLine($"{rVar} = {csType}.FromOk({okExpr});");
+                    }
+                    else
+                    {
+                        sb.AppendLine($"{rVar} = {csType}.FromOk(default);");
+                    }
+                }
+                sb.AppendLine("else");
+                using (sb.Block())
+                {
+                    if (errT is not null)
+                    {
+                        var errExpr = WriteMemoryLoad(sb, errT, baseVar, payOff, $"{varPrefix}Err");
+                        sb.AppendLine($"{rVar} = {csType}.FromErr({errExpr});");
+                    }
+                    else
+                    {
+                        sb.AppendLine($"{rVar} = {csType}.FromErr(default);");
+                    }
+                }
+                return rVar;
+            }
             case WitTypeKind.List:
                 if (type is WitListType listLoadType)
                 {
@@ -1036,7 +1158,7 @@ public static class GuestImportWriter
                     var inner = elem.Kind switch
                     {
                         WitTypeKind.Bool => $"{rawVar} != 0",
-                        WitTypeKind.Resource or WitTypeKind.Borrow => $"new {elemCs}({rawVar})",
+                        WitTypeKind.Resource or WitTypeKind.Borrow => GetResourceConstructorCall(elem, rawVar),
                         _ => $"({elemCs}){rawVar}",
                     };
                     sb.AppendLine($"return new {CanonicalAbi.WitTypeToCS(type)}({inner});");
@@ -1046,6 +1168,14 @@ public static class GuestImportWriter
                     sb.AppendLine($"return default;");
                 }
                 break;
+            case WitTypeKind.Result:
+            {
+                // Reached only for a bare `result` (single discriminant slot); payload-bearing
+                // results use the retptr/memory path.
+                var csType = CanonicalAbi.WitTypeToCS(type);
+                sb.AppendLine($"return {rawVar} == 0 ? {csType}.FromOk(default) : {csType}.FromErr(default);");
+                break;
+            }
             default:
                 sb.AppendLine($"return ({CanonicalAbi.WitTypeToCS(type)}){rawVar};");
                 break;
@@ -1130,11 +1260,16 @@ public static class GuestImportWriter
                 sb.AppendLine($"{listVar}[{idxVar}] = global::System.Text.Encoding.UTF8.GetString(elemStrPtr, elemStrLen);");
                 break;
             case WitTypeKind.Enum:
-                sb.AppendLine($"{listVar}[{idxVar}] = ({CanonicalAbi.WitTypeToCS(elemType)})*(int*){baseVar};");
+            {
+                // Width-correct read: a list's enum stride is its discriminant size (1/2/4),
+                // not always 4. Mirror the export side; parenthesize the deref (CS0119).
+                var enumKw = CanonicalAbi.IntStoreKeyword(CanonicalAbi.EnumSizeOf(elemType));
+                sb.AppendLine($"{listVar}[{idxVar}] = ({CanonicalAbi.WitTypeToCS(elemType)})(*({enumKw}*){baseVar});");
                 break;
+            }
             case WitTypeKind.Resource:
             case WitTypeKind.Borrow:
-                sb.AppendLine($"{listVar}[{idxVar}] = new {CanonicalAbi.WitTypeToCS(elemType)}(*(int*){baseVar});");
+                sb.AppendLine($"{listVar}[{idxVar}] = {GetResourceConstructorCall(elemType, $"*(int*){baseVar}")};");
                 break;
             case WitTypeKind.Record:
                 if (elemType is WitRecordType liftRecType)
@@ -1196,20 +1331,24 @@ public static class GuestImportWriter
         WitResource resource)
     {
         var className = resource.CSharpName;
+        var borrowName = $"{className}Borrow";
         var witName = resource.Name;
 
+        // --- Owned resource: a class with an ownership-guarded Dispose ---
         sb.AppendLine($"public class {className} : global::System.IDisposable");
         using (sb.Block())
         {
-            // Handle property and private constructor
+            // Handle property, ownership fields, internal constructor.
             sb.AppendLine("internal int Handle { get; }");
-            sb.AppendLine($"internal {className}(int handle) {{ Handle = handle; }}");
+            sb.AppendLine("private readonly bool _owned;");
+            sb.AppendLine("private bool _dropped;");
+            sb.AppendLine($"internal {className}(int handle, bool owned = true) {{ Handle = handle; _owned = owned; _dropped = false; }}");
             sb.AppendLine();
 
-            // Public constructors
+            // Public constructors (own the handle they create).
             foreach (var ctor in resource.Constructors)
             {
-                WriteResourceConstructor(sb, moduleName, witName, className, ctor);
+                WriteResourceConstructor(sb, moduleName, witName, className, ctor, "WasmImports");
                 sb.AppendLine();
             }
 
@@ -1218,7 +1357,7 @@ public static class GuestImportWriter
             {
                 if (method.Type is WitFuncType funcType)
                 {
-                    WriteResourceMethod(sb, moduleName, witName, className, method.Name, funcType, isStatic: false);
+                    WriteResourceMethod(sb, moduleName, witName, className, method.Name, funcType, isStatic: false, "WasmImports");
                     sb.AppendLine();
                 }
             }
@@ -1228,21 +1367,51 @@ public static class GuestImportWriter
             {
                 if (method.Type is WitFuncType funcType)
                 {
-                    WriteResourceMethod(sb, moduleName, witName, className, method.Name, funcType, isStatic: true);
+                    WriteResourceMethod(sb, moduleName, witName, className, method.Name, funcType, isStatic: true, "WasmImports");
                     sb.AppendLine();
                 }
             }
 
-            // Dispose
+            // Ownership-guarded Dispose: only owned handles are dropped, and only once.
             sb.AppendLine("public void Dispose()");
             using (sb.Block())
             {
-                sb.AppendLine("WasmImports.ResourceDrop(Handle);");
+                sb.AppendLine("if (_owned && !_dropped)");
+                using (sb.Block())
+                {
+                    sb.AppendLine("WasmImports.ResourceDrop(Handle);");
+                    sb.AppendLine("_dropped = true;");
+                }
             }
             sb.AppendLine();
 
-            // WasmImports nested class
+            // Implicit conversion lets an owned resource be passed where a borrow is expected.
+            sb.AppendLine($"public static implicit operator {borrowName}({className} owned) => new {borrowName}(owned.Handle);");
+            sb.AppendLine();
+
+            // WasmImports nested class (shared by both the class and the borrow struct).
             WriteResourceWasmImports(sb, moduleName, witName, className, resource);
+        }
+
+        sb.AppendLine();
+
+        // --- Borrowed resource: a readonly struct with the same instance methods, no Dispose ---
+        sb.AppendLine($"public readonly struct {borrowName}");
+        using (sb.Block())
+        {
+            sb.AppendLine("internal int Handle { get; }");
+            sb.AppendLine($"internal {borrowName}(int handle) {{ Handle = handle; }}");
+            sb.AppendLine();
+
+            // Instance methods only — identical bodies to the class, calling the class's WasmImports.
+            foreach (var method in resource.Methods)
+            {
+                if (method.Type is WitFuncType funcType)
+                {
+                    WriteResourceMethod(sb, moduleName, witName, className, method.Name, funcType, isStatic: false, $"{className}.WasmImports");
+                    sb.AppendLine();
+                }
+            }
         }
     }
 
@@ -1251,7 +1420,8 @@ public static class GuestImportWriter
         string moduleName,
         string witName,
         string className,
-        WitResourceConstructor ctor)
+        WitResourceConstructor ctor,
+        string wasmImports)
     {
         var isFallible = ctor.ReturnType != null;
 
@@ -1292,7 +1462,10 @@ public static class GuestImportWriter
                     WriteLowerParam(sb, param, callArgs);
                 }
 
-                sb.AppendLine($"Handle = WasmImports.Constructor({string.Join(", ", callArgs)});");
+                sb.AppendLine($"Handle = {wasmImports}.Constructor({string.Join(", ", callArgs)});");
+                // A handle created by our constructor is owned and must be dropped on Dispose.
+                sb.AppendLine("_owned = true;");
+                sb.AppendLine("_dropped = false;");
 
                 // Cleanup
                 foreach (var param in ctor.Parameters)
@@ -1310,7 +1483,8 @@ public static class GuestImportWriter
         string className,
         string methodName,
         WitFuncType funcType,
-        bool isStatic)
+        bool isStatic,
+        string wasmImports)
     {
         var csharpMethodName = StringUtils.GetName(methodName);
         var staticModifier = isStatic ? "static " : "";
@@ -1370,7 +1544,7 @@ public static class GuestImportWriter
 
             if (returnType == "void" && !useRetPtr)
             {
-                sb.AppendLine($"WasmImports.{csharpMethodName}({callArgsStr});");
+                sb.AppendLine($"{wasmImports}.{csharpMethodName}({callArgsStr});");
                 WriteResourceMethodCleanup(sb, funcType);
             }
             else if (!useRetPtr && funcType.Results.Length == 1)
@@ -1378,7 +1552,7 @@ public static class GuestImportWriter
                 if (resultWitType!.Kind == WitTypeKind.String)
                 {
                     sb.AppendLine($"int* retArea = stackalloc int[2];");
-                    sb.AppendLine($"WasmImports.{csharpMethodName}({(callArgs.Count > 0 ? callArgsStr + ", " : "")}(nint)retArea);");
+                    sb.AppendLine($"{wasmImports}.{csharpMethodName}({(callArgs.Count > 0 ? callArgsStr + ", " : "")}(nint)retArea);");
                     WriteResourceMethodCleanup(sb, funcType);
                     sb.AppendLine("var resultPtr = (byte*)retArea[0];");
                     sb.AppendLine("var resultLen = retArea[1];");
@@ -1388,25 +1562,25 @@ public static class GuestImportWriter
                 }
                 else if (IsSimplePrimitive(resultWitType))
                 {
-                    sb.AppendLine($"var rawResult = WasmImports.{csharpMethodName}({callArgsStr});");
+                    sb.AppendLine($"var rawResult = {wasmImports}.{csharpMethodName}({callArgsStr});");
                     WriteResourceMethodCleanup(sb, funcType);
                     WriteLiftResult(sb, resultWitType, "rawResult");
                 }
-                else if (resultWitType.Kind == WitTypeKind.Resource || resultWitType.Kind == WitTypeKind.User)
+                else if (resultWitType.Kind == WitTypeKind.Resource || resultWitType.Kind == WitTypeKind.Borrow)
                 {
-                    sb.AppendLine($"var rawResult = WasmImports.{csharpMethodName}({callArgsStr});");
+                    sb.AppendLine($"var rawResult = {wasmImports}.{csharpMethodName}({callArgsStr});");
                     WriteResourceMethodCleanup(sb, funcType);
-                    sb.AppendLine($"return new {returnType}(rawResult);");
+                    sb.AppendLine($"return {GetResourceConstructorCall(resultWitType, "rawResult")};");
                 }
                 else
                 {
-                    sb.AppendLine($"WasmImports.{csharpMethodName}({callArgsStr});");
+                    sb.AppendLine($"{wasmImports}.{csharpMethodName}({callArgsStr});");
                     WriteResourceMethodCleanup(sb, funcType);
                 }
             }
             else
             {
-                sb.AppendLine($"WasmImports.{csharpMethodName}({callArgsStr});");
+                sb.AppendLine($"{wasmImports}.{csharpMethodName}({callArgsStr});");
                 WriteResourceMethodCleanup(sb, funcType);
 
                 if (useRetPtr && funcType.Results.Length > 0)
@@ -1447,9 +1621,9 @@ public static class GuestImportWriter
                         sb.AppendLine($"WitBindgen.Runtime.InteropHelpers.Free(resultListPtr, resultListCount * {elemSize}, {elemAlign});");
                         sb.AppendLine("return resultList;");
                     }
-                    else if (resultWitType.Kind == WitTypeKind.Resource || resultWitType.Kind == WitTypeKind.User)
+                    else if (resultWitType.Kind == WitTypeKind.Resource || resultWitType.Kind == WitTypeKind.Borrow)
                     {
-                        sb.AppendLine($"return new {returnType}(retArea[0]);");
+                        sb.AppendLine($"return {GetResourceConstructorCall(resultWitType, "retArea[0]")};");
                     }
                     else if (IsSimplePrimitive(resultWitType))
                     {
@@ -1504,7 +1678,8 @@ public static class GuestImportWriter
         string className,
         WitResource resource)
     {
-        sb.AppendLine("private static partial class WasmImports");
+        // internal (not private) so the sibling {className}Borrow struct can reuse these imports.
+        sb.AppendLine("internal static partial class WasmImports");
         using (sb.Block())
         {
             // Constructor(s)
